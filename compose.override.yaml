@@ -1,10 +1,10 @@
 # For running Hydra on a dev machine, without nginx or certificates: `docker compose up` in this folder. Compose reads
 # this file automatically next to compose.yaml; deploy.mjs never copies it to the VM.
-# It uses fixed, not-secret dev values instead of config/hydra.env, keeps the database in data/postgres here, and
+# It uses fixed, not-secret dev values instead of config/*.env, keeps the databases in data/postgres here, and
 # publishes Hydra on localhost over plain http: http://localhost:4444 (public) and http://localhost:4445 (admin).
 x-dev-env: &dev-env
   POSTGRES_PASSWORD: dev-only
-  DSN: postgres://hydra:dev-only@postgres:5432/hydra?sslmode=disable
+  DSN: postgres://hydra:hydra-dev-only@postgres:5432/hydra?sslmode=disable
   SECRETS_SYSTEM: dev-only-secret-at-least-32-characters
   URLS_SELF_ISSUER: http://localhost:4444/
   # Placeholders on a port nothing uses: no login app is planned (see hydra/hydra.yml).
@@ -16,6 +16,10 @@ x-dev-env: &dev-env
 
 services:
   postgres:
+    env_file: !reset []
+    environment: *dev-env
+
+  hydra-db:
     env_file: !reset []
     environment: *dev-env
 

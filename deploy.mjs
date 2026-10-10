@@ -7,8 +7,9 @@ import { ROOT, SSH_USAGE, fail, here, onVm, parseArgs, quote, sendFile } from '.
 
 const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-options "<options>"]
 
-  setup                 Install Docker, create ${ROOT} and Hydra's secrets on a fresh VM (asks for your sudo password)
-  vm                    Copy compose.yaml, hydra/, nginx/ and the config examples, and apply them
+  setup                 Install Docker and create ${ROOT} on a fresh VM (asks for your sudo password)
+  vm                    Copy compose.yaml, hydra/, nginx/, postgres/, bin/ and the config examples, make any missing
+                        secrets, and apply them
   status                What's running
   logs [service]        The last 200 lines of a service's log (hydra, postgres, nginx, certbot), or all of them
 
@@ -16,7 +17,7 @@ ${SSH_USAGE}
 
 Example: node deploy.mjs status --host me@vm.example.org --ssh-options "-i ~/.ssh/vm_key"`;
 
-const FOLDERS = ['hydra', 'nginx'];
+const FOLDERS = ['hydra', 'nginx', 'postgres', 'bin'];
 
 async function deployVm() {
   // Only the examples: never your own config/*.env, if you have any here.
@@ -32,6 +33,8 @@ async function deployVm() {
     `for dir in ${FOLDERS.join(' ')}; do find "$dir" -mindepth 1 ! -type d -delete && cp -a ".incoming/$dir/." "$dir/" || exit 1; done`,
     'cp .incoming/compose.yaml . && cp .incoming/config/*.env.example config/',
     'rm -rf .incoming',
+    // Secrets nobody needs to choose (postgres.env, hydra.env); files that exist are left alone.
+    'sh bin/secrets.sh',
     // docker compose won't run while an env file it names is missing, as on a new VM: say which, and stop here.
     'missing=$(for example in config/*.env.example; do [ -f "${example%.example}" ] || echo "  ' + ROOT + '/${example%.example}"; done)',
     `{ [ -z "$missing" ] || { printf 'Copied. Before anything can start, create these from the .env.example next to each, then run this again:\\n%s\\n' "$missing"; exit 0; }; }`,

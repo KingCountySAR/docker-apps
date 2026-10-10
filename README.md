@@ -11,7 +11,10 @@ A consolidated/modular system to collect apps and core services for King County 
   - Certificates take care of themselves. certbot gets each site's certificate once Let's Encrypt
   can reach it here (trying staging first, so waiting for DNS doesn't use up the real limits), and renews it.
   nginx loads each site once it has a certificate. When a site's file is removed, certbot deletes its certificate.
-- **Postgres** (`data/postgres/`)
+- **Postgres** is shared by the apps (`data/postgres/`), on the compose network at `postgres:5432`, never published.
+  - Each app has its own database and user, which only it can connect to. Its `<app>-db` service makes them from
+    the app's connection URL before the app starts (see [Adding a database](#adding-a-database)).
+  - The superuser's password is in `config/postgres.env`, made by `bin/secrets.sh`.
 - **Hydra** runs `serve all` on `oryd/hydra:v2.3.0`, with its database in Postgres.
   - `hydra-migrate` updates the database before Hydra starts, on every `docker compose up`.
   - Hydra's public API is on the internet, at https://jwt.kingcountysar.org: clients anywhere get tokens from
@@ -21,7 +24,7 @@ A consolidated/modular system to collect apps and core services for King County 
   - The admin API is never public. Hydra's admin port (4445) has no authentication. It's only on the compose
   network (`http://hydra:4445`) and the VM's loopback address. `node hydra.mjs` reaches it over ssh.
   - Configuration is in `hydra/hydra.yml` (in git, no secrets). The secrets are only on the VM, in
-  `/srv/kcsara/config/hydra.env`, which `setup-vm.sh` generates.
+  `/srv/kcsara/config/hydra.env`, which `bin/secrets.sh` makes.
   - Machine-to-machine tokens only (`client_credentials`). There's no login and consent app, and none is planned:
   hydra.yml leaves `urls.login` and `urls.consent` at Hydra's defaults.
 
@@ -32,16 +35,18 @@ A consolidated/modular system to collect apps and core services for King County 
 http://localhost:4445, and placeholder login/consent URLs on `http://localhost:3999/...`, out of the way of other dev
 servers. Its database is in `data/` here (delete that folder to start over).
 
-`node hydra.mjs --local <command>` runs Hydra's command line in that local stack.
+`node hydra.mjs --local <command>` runs Hydra's command line in that local stack, and `node db.mjs --local <database>`
+opens psql there.
 
 ## On the VM
 
 ```
 /srv/kcsara/
-  compose.yaml, hydra/, nginx/   from this repo (node deploy.mjs vm); nginx/ includes certbot's script
-  config/                        settings and secrets: hydra.env (made by setup-vm.sh), certbot.env
+  compose.yaml, hydra/, nginx/,  from this repo (node deploy.mjs vm); nginx/ includes certbot's script
+    postgres/, bin/
+  config/                        settings and secrets: postgres.env, hydra.env (made by bin/secrets.sh), certbot.env
   data/                          everything the services write
-    postgres/                    Hydra's database
+    postgres/                    the shared postgres: every app's database
     letsencrypt/                 certificates
     acme-challenge/              certbot's answers to Let's Encrypt's checks
 ```
@@ -54,9 +59,9 @@ servers. Its database is in `data/` here (delete that folder to start over).
    `sudo ss -ltnp | grep -E ':(80|443) '`.
 2. **Your ssh login.** Check you can `ssh` to the VM, then put it in `.env` here as `DEPLOY_HOST` (copy
    `.env.example`), or give `--host` on each command.
-3. **Docker, folders and Hydra's secrets.** `node deploy.mjs setup` (it asks for your sudo password on the VM).
-4. **Copy this folder's files over.** `node deploy.mjs vm`. This first time it stops after copying, and lists the
-   configuration still missing.
+3. **Docker and folders.** `node deploy.mjs setup` (it asks for your sudo password on the VM).
+4. **Copy this folder's files over.** `node deploy.mjs vm`. It makes the secrets (`postgres.env`, `hydra.env`) with
+   random values. This first time it stops after copying, and lists the configuration still missing.
 5. **Configuration**, on the VM: `cp /srv/kcsara/config/certbot.env.example /srv/kcsara/config/certbot.env` and set an
    address for Let's Encrypt's expiry warnings.
 6. **Test name.** Until `jwt.kingcountysar.org` points here, you can run Hydra under a test name (see
@@ -68,7 +73,7 @@ servers. Its database is in `data/` here (delete that folder to start over).
 9. **Check it.** `https://<host>/.well-known/openid-configuration` shows the issuer and endpoints. To try a token,
    make a client with `node hydra.mjs create oauth2-client ...` (below), then
    `curl -u <client id>:<client secret> -d grant_type=client_credentials -d scope=<scope> https://<host>/oauth2/token`.
-10. **Back up `config/hydra.env`** somewhere safe (a password manager). Without `SECRETS_SYSTEM`, the database's
+10. **Back up `config/postgres.env` and `config/hydra.env`** somewhere safe (a password manager). Without `SECRETS_SYSTEM`, the database's
     client secrets and signing keys can't be read.
 
 ## Testing under another name
@@ -112,6 +117,21 @@ The client secret is shown only when the client is created: copy it to the app's
 Apps on the VM in another compose project can join the `kcsara` network (see `compose.yaml`) and call Hydra at
 `http://hydra:4444` (public) and `http://hydra:4445` (admin), without going through nginx.
 
+## Adding a database
+
+For an app that uses the shared postgres (`<app>` is its name):
+
+1. Give it a connection URL with its own user, database and a hex password (no URL encoding), in its env file in
+   `config/`: `postgres://<app>:<password>@postgres:5432/<app>`. Add making it to `bin/secrets.sh`, like hydra.env's.
+2. Copy the `hydra-db` service in `compose.yaml` to `<app>-db`, with the app's env file first in `env_file` and
+   `DATABASE_URL_FROM` set to the name of the variable holding the URL. Make the app depend on it:
+   `depends_on: { <app>-db: { condition: service_completed_successfully } }`.
+3. `node deploy.mjs vm`. `<app>-db` creates the user and database, and on every start sets the user's password to
+   the one in the URL: to change it, change the URL and run `docker compose up -d` on the VM.
+
+An app in a separate compose project uses it the same way: join the `kcsara` network and connect to `postgres:5432`.
+Its `<app>-db` service still goes here.
+
 ## Everyday
 
 | To | Run |
@@ -120,7 +140,8 @@ Apps on the VM in another compose project can join the `kcsara` network (see `co
 | See what's running | `node deploy.mjs status` |
 | See a service's log | `node deploy.mjs logs hydra` (or `postgres`, `nginx`, `certbot`) |
 | Upgrade Hydra | change the image tag in `compose.yaml` (read Ory's upgrade notes first), back up the database, `node deploy.mjs vm` |
-| Back up the database | on the VM: `docker compose exec -T postgres pg_dump -U hydra hydra \| gzip > hydra-$(date +%F).sql.gz` |
+| Back up a database | on the VM: `docker compose exec -T postgres pg_dump -U postgres <database> \| gzip > <database>-$(date +%F).sql.gz` (or `pg_dumpall` for all of them) |
+| Open psql as the superuser | `node db.mjs <database>` (like `node db.mjs hydra`; no database for `postgres`). Add psql options after it, like `-c "<sql>"`, or `< file.sql` to run a file |
 | See certificates | on the VM: `docker compose exec certbot certbot certificates` |
 
 ## Rotating Hydra's secret
