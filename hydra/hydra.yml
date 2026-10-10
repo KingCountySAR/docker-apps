@@ -1,0 +1,33 @@
+# Hydra's configuration (https://www.ory.sh/docs/hydra/reference/configuration). Secrets aren't here: DSN and
+# SECRETS_SYSTEM come from config/hydra.env on the VM. Environment variables override this file (urls.self.issuer is
+# URLS_SELF_ISSUER, and so on), which is how compose.override.yaml runs it on localhost.
+serve:
+  public:
+    port: 4444
+  admin:
+    port: 4445
+  cookies:
+    same_site_mode: Lax
+
+urls:
+  self:
+    # The host name in tokens and the discovery document; it needs a site in nginx/sites/.
+    issuer: https://jwt.kingcountysar.org/
+  # urls.login, urls.consent and the others are left at Hydra's defaults: no login and consent app is planned, so only
+  # client_credentials (machine to machine) tokens work.
+
+oidc:
+  subject_identifiers:
+    supported_types: [public]
+
+strategies:
+  access_token: jwt
+
+ttl:
+  access_token: 1h
+  refresh_token: 720h
+
+log:
+  level: info
+  format: json
+  leak_sensitive_values: false

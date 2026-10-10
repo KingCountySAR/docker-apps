@@ -1,0 +1,6 @@
+# Real configuration and VM state never go in git.
+config/*.env
+data/
+
+# Your own deploy settings (see .env.example)
+.env
