@@ -8,16 +8,35 @@ import { ROOT, SSH_USAGE, fail, here, onVm, parseArgs, quote, sendFile } from '.
 const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-options "<options>"]
 
   setup                 Install Docker and create ${ROOT} on a fresh VM (asks for your sudo password)
-  vm                    Copy compose.yaml, hydra/, nginx/, postgres/, bin/ and the config examples, make any missing
-                        secrets, and apply them
+  vm                    Copy compose.yaml, hydra/, nginx/, postgres/, monitoring/, bin/ and the config examples, make
+                        any missing secrets, and apply them
   status                What's running
-  logs [service]        The last 200 lines of a service's log (hydra, postgres, nginx, certbot), or all of them
+  logs [service]        The last 200 lines of a service's log (hydra, postgres, nginx, grafana, ...), or all of them
 
 ${SSH_USAGE}
 
 Example: node deploy.mjs status --host me@vm.example.org --ssh-options "-i ~/.ssh/vm_key"`;
 
-const FOLDERS = ['hydra', 'nginx', 'postgres', 'bin'];
+const FOLDERS = ['hydra', 'nginx', 'postgres', 'monitoring', 'bin'];
+
+// Configuration a service reads only when it starts, which compose doesn't watch: the service restarts when any of it
+// changed since the last deploy (when the service is running).
+const RESTART_ON_CHANGE = {
+  hydra: ['hydra/hydra.yml'],
+  prometheus: ['monitoring/prometheus/prometheus.yml'],
+  grafana: ['monitoring/grafana'],
+  alloy: ['monitoring/alloy'],
+  'blackbox-exporter': ['monitoring/blackbox.yml'],
+};
+
+/** Shell commands restarting each service in RESTART_ON_CHANGE whose files changed, remembering their checksums */
+function restartsOnChange() {
+  return Object.entries(RESTART_ON_CHANGE).map(([service, paths]) => {
+    const sum = `find ${paths.join(' ')} -type f -exec md5sum {} + | sort | md5sum`;
+    const state = `.${service}.md5`;
+    return `{ now=$(${sum}); [ "$now" = "$(cat ${state} 2> /dev/null)" ] || { [ -z "$(docker compose ps -q ${service} 2> /dev/null)" ] || docker compose restart ${service}; echo "$now" > ${state}; }; }`;
+  });
+}
 
 async function deployVm() {
   // Only the examples: never your own config/*.env, if you have any here.
@@ -33,14 +52,18 @@ async function deployVm() {
     `for dir in ${FOLDERS.join(' ')}; do find "$dir" -mindepth 1 ! -type d -delete && cp -a ".incoming/$dir/." "$dir/" || exit 1; done`,
     'cp .incoming/compose.yaml . && cp .incoming/config/*.env.example config/',
     'rm -rf .incoming',
-    // Secrets nobody needs to choose (postgres.env, hydra.env); files that exist are left alone.
+    // Secrets nobody needs to choose (postgres.env, hydra.env, ...); files that exist are left alone.
     'sh bin/secrets.sh',
+    // The sites for Prometheus's health checks
+    'sh bin/site-targets.sh',
+    // Everything runs unless .env says otherwise (see "Choosing what runs" in the README).
+    'grep -qs "^COMPOSE_PROFILES=" .env || echo COMPOSE_PROFILES=full >> .env',
     // docker compose won't run while an env file it names is missing, as on a new VM: say which, and stop here.
     'missing=$(for example in config/*.env.example; do [ -f "${example%.example}" ] || echo "  ' + ROOT + '/${example%.example}"; done)',
     `{ [ -z "$missing" ] || { printf 'Copied. Before anything can start, create these from the .env.example next to each, then run this again:\\n%s\\n' "$missing"; exit 0; }; }`,
-    // Recreates whatever compose.yaml changed; hydra restarts too if hydra.yml did (compose doesn't notice that).
+    // Recreates whatever compose.yaml changed, then restarts services whose own configuration did.
     'docker compose up -d --remove-orphans',
-    'if [ "$(md5sum hydra/hydra.yml)" != "$(cat .hydra.yml.md5 2> /dev/null)" ]; then docker compose restart hydra && md5sum hydra/hydra.yml > .hydra.yml.md5; fi',
+    ...restartsOnChange(),
     // Loads new or changed sites now rather than within the minute; a site without a certificate yet waits for one.
     'docker compose exec -T nginx sh /etc/kcsara-nginx/run.sh check',
     // A new site gets its certificate on certbot's next try; restarting it tries now.

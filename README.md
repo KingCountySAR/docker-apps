@@ -27,6 +27,8 @@ A consolidated/modular system to collect apps and core services for King County 
   `/srv/kcsara/config/hydra.env`, which `bin/secrets.sh` makes.
   - Machine-to-machine tokens only (`client_credentials`). There's no login and consent app, and none is planned:
   hydra.yml leaves `urls.login` and `urls.consent` at Hydra's defaults.
+- **Monitoring** (profiles `monitoring` and `full`, on by default on the VM): Prometheus collects metrics and Grafana graphs
+  them and alerts, from `monitoring/`. See [Monitoring](#monitoring).
 
 ## On a dev machine
 
@@ -38,17 +40,25 @@ servers. Its database is in `data/` here (delete that folder to start over).
 `node hydra.mjs --local <command>` runs Hydra's command line in that local stack, and `node db.mjs --local <database>`
 opens psql there.
 
+`docker compose --profile monitoring up` adds monitoring, with Grafana on http://localhost:3030 (admin, password
+`dev-only`). Without nginx locally, the Sites dashboard stays empty, and on Docker Desktop cAdvisor sees only the
+whole machine, not each container.
+
 ## On the VM
 
 ```
 /srv/kcsara/
   compose.yaml, hydra/, nginx/,  from this repo (node deploy.mjs vm); nginx/ includes certbot's script
-    postgres/, bin/
-  config/                        settings and secrets: postgres.env, hydra.env (made by bin/secrets.sh), certbot.env
+    postgres/, monitoring/, bin/
+  .env                           COMPOSE_PROFILES: which profiles run (full, unless changed)
+  config/                        settings and secrets: certbot.env, and postgres.env, hydra.env, grafana.env and
+                                 postgres-exporter.env (made by bin/secrets.sh)
   data/                          everything the services write
     postgres/                    the shared postgres: every app's database
     letsencrypt/                 certificates
     acme-challenge/              certbot's answers to Let's Encrypt's checks
+    prometheus/                  metrics, kept a year (or 10 GB)
+    grafana/                     Grafana's users, settings and alert state
 ```
 
 `config/` and `data/` are all there is to back up; everything else comes from this repo.
@@ -60,8 +70,8 @@ opens psql there.
 2. **Your ssh login.** Check you can `ssh` to the VM, then put it in `.env` here as `DEPLOY_HOST` (copy
    `.env.example`), or give `--host` on each command.
 3. **Docker and folders.** `node deploy.mjs setup` (it asks for your sudo password on the VM).
-4. **Copy this folder's files over.** `node deploy.mjs vm`. It makes the secrets (`postgres.env`, `hydra.env`) with
-   random values. This first time it stops after copying, and lists the configuration still missing.
+4. **Copy this folder's files over.** `node deploy.mjs vm`. It makes the secrets (`postgres.env`, `hydra.env`,
+   `grafana.env`, `postgres-exporter.env`) with random values. This first time it stops after copying, and lists the configuration still missing.
 5. **Configuration**, on the VM: `cp /srv/kcsara/config/certbot.env.example /srv/kcsara/config/certbot.env` and set an
    address for Let's Encrypt's expiry warnings.
 6. **Test name.** Until `jwt.kingcountysar.org` points here, you can run Hydra under a test name (see
@@ -73,7 +83,7 @@ opens psql there.
 9. **Check it.** `https://<host>/.well-known/openid-configuration` shows the issuer and endpoints. To try a token,
    make a client with `node hydra.mjs create oauth2-client ...` (below), then
    `curl -u <client id>:<client secret> -d grant_type=client_credentials -d scope=<scope> https://<host>/oauth2/token`.
-10. **Back up `config/postgres.env` and `config/hydra.env`** somewhere safe (a password manager). Without `SECRETS_SYSTEM`, the database's
+10. **Back up `config/`** somewhere safe (a password manager). Without `SECRETS_SYSTEM`, the database's
     client secrets and signing keys can't be read.
 
 ## Testing under another name
@@ -132,13 +142,87 @@ For an app that uses the shared postgres (`<app>` is its name):
 An app in a separate compose project uses it the same way: join the `kcsara` network and connect to `postgres:5432`.
 Its `<app>-db` service still goes here.
 
+## Monitoring
+
+Prometheus collects, every 30 seconds:
+
+| From | What |
+|---|---|
+| `alloy` | Each site's requests, status codes, response times and bytes, counted from nginx's log (`monitoring/alloy/config.alloy`; nginx logs each request as JSON, `nginx/nginx.conf`) |
+| `node-exporter` | The VM's CPU, memory, disk I/O and filesystems (not its network: see cadvisor) |
+| `cadvisor` | Each service's CPU, memory, disk and network |
+| `postgres-exporter` | Postgres's connections, database sizes and activity, as a read-only `postgres_exporter` user |
+| `hydra` | Hydra's own request counts and times, per endpoint |
+| `blackbox-exporter` | Health checks: each site in `nginx/sites/` over https from the VM (DNS, certificate and its expiry, an answer that isn't a server error), and Hydra's `/health/ready` |
+
+A new site in `nginx/sites/` is checked and graphed without any other change: `bin/site-targets.sh` lists them for
+Prometheus on each deploy.
+
+**Grafana** is only on the VM's own loopback address. `node grafana.mjs` opens it at http://localhost:3030 through an
+ssh tunnel, until Ctrl+C. Sign in as `admin`, with `GF_SECURITY_ADMIN_PASSWORD` from `config/grafana.env` on the VM.
+Its dashboards, in the KCSARA folder:
+
+- **Sites**: requests per second, 4xx and 5xx, response times (median and 95th percentile, and the app's own), per site
+- **Host**: the VM's CPU, load, memory, filesystems and disks
+- **Containers**: each service's CPU, memory, network and disk
+- **Health**: health checks, certificate expiry, what Prometheus can reach, Postgres, and Hydra's token requests
+
+The dashboards come from `monitoring/grafana/dashboards/`, so changes made in Grafana can't be saved over them. To
+change one, edit it in Grafana, then copy its JSON (Edit → Settings → JSON Model) into that file, and deploy.
+
+The health checks run from the VM itself, so they can't tell you the VM is down. Add one outside check of a site
+(UptimeRobot, Grafana Cloud's free tier, or Azure Monitor) for that.
+
+### Alerts
+
+`monitoring/grafana/provisioning/alerting/rules.yaml` has the rules: a site down (only one that's been up in the last
+week, so a site waiting for DNS doesn't count), Hydra's health check failing, Prometheus unable to collect from a
+service, a site with over 5% server errors, a certificate with under 14 days left, a filesystem under 10% free, memory
+under 10% available, and the CPU over 90% for half an hour. Grafana → Alerting → Alert rules shows them.
+
+**They're not sent anywhere yet.** To send them, add a contact point (email or Slack) in Grafana → Alerting → Contact
+points, and make it the default policy's in Notification policies. Email needs Grafana's `[smtp]` settings
+(`GF_SMTP_*` in `config/grafana.env`); Slack needs only a webhook address.
+
+### Signing in to Grafana with Google
+
+1. Google Cloud console → APIs & Services → Credentials → Create credentials → OAuth client ID → Web application.
+   Authorized redirect URI: `http://localhost:3030/login/google`. In a project in your Google Workspace, an
+   "Internal" consent screen lets only your organization's accounts in.
+2. In `config/grafana.env` on the VM: `GF_AUTH_GOOGLE_ENABLED=true`, the client's id and secret, and
+   `GF_AUTH_GOOGLE_ALLOWED_DOMAINS=<your Workspace domain>`. Then `docker compose up -d grafana` there.
+3. People signing in for the first time are Viewers; make admins in Grafana → Administration → Users.
+
+When Grafana gets a public site, add `https://<its host>/login/google` to the client's redirect URIs, set
+`root_url` in `monitoring/grafana/grafana.ini` to its address, and add its site to `nginx/sites/` (proxying to
+`http://grafana:3000`).
+
+### Choosing what runs
+
+The core (postgres, hydra, nginx, certbot) always runs. Everything else is in profiles: each part in `full` and in its
+own (`monitoring`, and each app added later). Profiles only add services, so to leave one part out, list the others
+rather than using `full`.
+
+| Command | Runs |
+|---|---|
+| `docker compose --profile full up` | everything |
+| `docker compose --profile monitoring up` | the core and monitoring |
+| `docker compose up` | only the core |
+
+On the VM, `COMPOSE_PROFILES` in `/srv/kcsara/.env` picks the profiles for every `docker compose` command there, comma
+separated; `node deploy.mjs vm` sets it to `full` if it isn't set. Turning a profile off doesn't stop what's already
+running: stop those by name too (like `docker compose --profile monitoring stop`).
+
+A new optional part gets `profiles: [full, <its name>]` on each of its services.
+
 ## Everyday
 
 | To | Run |
 |---|---|
-| Change hydra.yml, nginx/ (sites, certbot) or compose.yaml | edit here, then `node deploy.mjs vm` (it restarts Hydra if hydra.yml changed) |
+| Change hydra.yml, nginx/, monitoring/ or compose.yaml | edit here, then `node deploy.mjs vm` (it restarts each service whose own configuration changed) |
+| Open Grafana | `node grafana.mjs`, then http://localhost:3030 |
 | See what's running | `node deploy.mjs status` |
-| See a service's log | `node deploy.mjs logs hydra` (or `postgres`, `nginx`, `certbot`) |
+| See a service's log | `node deploy.mjs logs hydra` (or `postgres`, `nginx`, `certbot`, `grafana`, ...) |
 | Upgrade Hydra | change the image tag in `compose.yaml` (read Ory's upgrade notes first), back up the database, `node deploy.mjs vm` |
 | Back up a database | on the VM: `docker compose exec -T postgres pg_dump -U postgres <database> \| gzip > <database>-$(date +%F).sql.gz` (or `pg_dumpall` for all of them) |
 | Open psql as the superuser | `node db.mjs <database>` (like `node db.mjs hydra`; no database for `postgres`). Add psql options after it, like `-c "<sql>"`, or `< file.sql` to run a file |

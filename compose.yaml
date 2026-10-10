@@ -9,6 +9,15 @@
 # own: it's only on this network and the VM's loopback address, never through nginx.
 name: kcsara
 
+# Profiles choose what runs besides the core here (postgres, hydra, nginx, certbot), which always does. Each optional
+# part is in `full` and in its own profile (`monitoring`, ...). On the VM, COMPOSE_PROFILES in .env picks them for every
+# docker compose command there: `full` unless changed (see "Choosing what runs" in the README).
+
+# Prometheus, Grafana and what they collect from: profiles full and monitoring.
+include:
+  - path: monitoring/compose.yaml
+    project_directory: .
+
 services:
   # Shared by the apps: each has its own database and user, made by its <app>-db service. Only on this network
   # (postgres:5432), not published. As the superuser: `docker compose exec postgres psql -U postgres` on the VM.

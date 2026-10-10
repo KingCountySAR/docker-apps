@@ -1,7 +1,7 @@
 #!/bin/sh
-# Runs nginx with default.conf and each site in sites/ (<host>.conf) that has a certificate. nginx won't start with a
-# missing certificate, so a site waits until the certbot container has its certificate. Every minute this checks for
-# new or renewed certificates and changed configuration, and reloads nginx when something changed.
+# Runs nginx with nginx.conf, default.conf and each site in sites/ (<host>.conf) that has a certificate. nginx won't
+# start with a missing certificate, so a site waits until the certbot container has its certificate. Every minute this
+# checks for new or renewed certificates and changed configuration, and reloads nginx when something changed.
 #
 #   sh run.sh         start nginx (the container's command)
 #   sh run.sh check   apply changes now (`node deploy.mjs vm` runs this)
@@ -15,18 +15,19 @@ state_file=/tmp/sites.state
 # A fingerprint of the configuration and the certificates, to notice changes.
 state() {
   {
-    cat "$src"/default.conf "$src"/*.inc "$src"/sites/*.conf 2> /dev/null
+    cat "$src"/nginx.conf "$src"/default.conf "$src"/*.inc "$src"/sites/*.conf 2> /dev/null
     stat -L -c '%n %Y' "$certs"/*/fullchain.pem 2> /dev/null
   } | md5sum
 }
 
-# Copies default.conf and the sites with certificates into nginx's conf.d.
+# Copies nginx.conf into place, and default.conf and the sites with certificates into nginx's conf.d.
 enable_sites() {
   # Without default.conf the configuration folder is missing or half-copied: change nothing.
   if [ ! -f "$src/default.conf" ]; then
     echo "no $src/default.conf; leaving nginx as it is (recreate this container if its folder was replaced)"
     return 1
   fi
+  cp "$src/nginx.conf" /etc/nginx/nginx.conf
   rm -f "$conf"/*.conf
   cp "$src/default.conf" "$conf/default.conf"
   enabled="" waiting=""

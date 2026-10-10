@@ -1,0 +1,130 @@
+# Monitoring, included by compose.yaml: Prometheus collects metrics, Grafana shows them and alerts. Paths are relative
+# to the repo (compose.yaml's folder), like there. Nothing here is reachable from outside the VM: Grafana is on the
+# VM's loopback address, for `node grafana.mjs` (an ssh tunnel).
+# Every service is in the monitoring and full profiles: `docker compose --profile monitoring up`. On the VM,
+# COMPOSE_PROFILES in /srv/kcsara/.env (full, unless changed) turns it on for every docker compose command there.
+#   data/prometheus/    metrics, kept a year (or 10 GB)
+#   data/grafana/       Grafana's own database: users, settings, alert state
+services:
+  # Gives Prometheus and Grafana their data folders, owned by the users they run as, then exits.
+  monitoring-data:
+    profiles: [full, monitoring]
+    image: busybox:1.37
+    volumes:
+      - ./data:/data
+    command: ["sh", "-c", "mkdir -p /data/prometheus /data/grafana && chown 65534:65534 /data/prometheus && chown 472:0 /data/grafana"]
+    restart: on-failure
+
+  prometheus:
+    profiles: [full, monitoring]
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=365d
+      - --storage.tsdb.retention.size=10GB
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus:ro
+      - ./data/prometheus:/prometheus
+    depends_on:
+      monitoring-data: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  grafana:
+    profiles: [full, monitoring]
+    image: grafana/grafana:12.1.1
+    # GF_SECURITY_ADMIN_PASSWORD, and the Google sign-in client; everything else is in monitoring/grafana/grafana.ini
+    env_file: ./config/grafana.env
+    volumes:
+      - ./monitoring/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - ./data/grafana:/var/lib/grafana
+    # Only on the VM's own loopback address: `node grafana.mjs` tunnels http://localhost:3030 here.
+    ports:
+      - "127.0.0.1:3030:3000"
+    depends_on:
+      monitoring-data: { condition: service_completed_successfully }
+      prometheus: { condition: service_started }
+    restart: unless-stopped
+
+  # Reads nginx's log from Docker and counts requests per site (see monitoring/alloy/config.alloy). Docker's socket
+  # lets it read containers' logs; it's mounted read-only, but anything with the socket can use all of Docker's API.
+  alloy:
+    profiles: [full, monitoring]
+    image: grafana/alloy:v1.10.2
+    command: ["run", "--disable-reporting", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - ./monitoring/alloy:/etc/alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Where it's read up to in each log, so a restart doesn't count requests again
+      - alloy-data:/var/lib/alloy/data
+    restart: unless-stopped
+
+  # The VM's CPU, memory, disk I/O and filesystems. Its network numbers are its container's own, not the VM's: see
+  # cadvisor for each container's traffic.
+  node-exporter:
+    profiles: [full, monitoring]
+    image: prom/node-exporter:v1.9.1
+    command: ["--path.rootfs=/host"]
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    restart: unless-stopped
+
+  # Each container's CPU, memory, disk and network, labelled by compose service.
+  cadvisor:
+    profiles: [full, monitoring]
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=30s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.service
+      - --disable_metrics=percpu,sched,tcp,udp,process,hugetlb,referenced_memory,cpu_topology,resctrl,cpuset,advtcp,memory_numa
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    restart: unless-stopped
+
+  # Postgres's own numbers: connections, database sizes, activity. Signs in as its own user with pg_monitor's
+  # read-only access, made by postgres-exporter-db.
+  postgres-exporter:
+    profiles: [full, monitoring]
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    env_file: ./config/postgres-exporter.env
+    depends_on:
+      postgres-exporter-db: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  postgres-exporter-db:
+    profiles: [full, monitoring]
+    image: postgres:17-alpine
+    env_file: [./config/postgres-exporter.env, ./config/postgres.env]
+    environment:
+      DATABASE_URL_FROM: DATA_SOURCE_NAME
+      MEMBER_OF: pg_monitor
+    volumes:
+      - ./postgres:/scripts:ro
+    command: ["sh", "/scripts/create-database.sh"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: on-failure
+
+  # Runs the health checks Prometheus asks for (see monitoring/blackbox.yml).
+  blackbox-exporter:
+    profiles: [full, monitoring]
+    image: prom/blackbox-exporter:v0.27.0
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./monitoring/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    restart: unless-stopped
+
+volumes:
+  alloy-data:

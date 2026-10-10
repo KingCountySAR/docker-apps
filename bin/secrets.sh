@@ -24,3 +24,28 @@ SECRETS_SYSTEM=$(random 32)
 END
   echo "made config/hydra.env"
 fi
+
+if [ ! -f postgres-exporter.env ]; then
+  cat > postgres-exporter.env << END
+# Made by bin/secrets.sh. postgres-exporter-db creates this user, with pg_monitor's read-only access, from the URL.
+DATA_SOURCE_NAME=postgres://postgres_exporter:$(random 24)@postgres:5432/postgres?sslmode=disable
+END
+  echo "made config/postgres-exporter.env"
+fi
+
+if [ ! -f grafana.env ]; then
+  cat > grafana.env << END
+# Made by bin/secrets.sh. Grafana's settings as GF_<SECTION>_<KEY>, overriding monitoring/grafana/grafana.ini.
+# The admin login (user admin). Grafana sets it only when it first creates data/grafana: after that, change it in
+# Grafana (or with \`docker compose exec grafana grafana cli admin reset-admin-password <new>\`).
+GF_SECURITY_ADMIN_PASSWORD=$(random 16)
+
+# Google sign-in (see "Signing in to Grafana with Google" in the README): the OAuth client's id and secret, and the
+# Google Workspace domain whose accounts may sign in. Then GF_AUTH_GOOGLE_ENABLED=true and \`docker compose up -d grafana\`.
+#GF_AUTH_GOOGLE_ENABLED=true
+#GF_AUTH_GOOGLE_CLIENT_ID=
+#GF_AUTH_GOOGLE_CLIENT_SECRET=
+#GF_AUTH_GOOGLE_ALLOWED_DOMAINS=
+END
+  echo "made config/grafana.env"
+fi

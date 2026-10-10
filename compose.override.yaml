@@ -2,6 +2,7 @@
 # this file automatically next to compose.yaml; deploy.mjs never copies it to the VM.
 # It uses fixed, not-secret dev values instead of config/*.env, keeps the databases in data/postgres here, and
 # publishes Hydra on localhost over plain http: http://localhost:4444 (public) and http://localhost:4445 (admin).
+# `docker compose --profile monitoring up` adds monitoring, with Grafana on http://localhost:3030.
 x-dev-env: &dev-env
   POSTGRES_PASSWORD: dev-only
   DSN: postgres://hydra:hydra-dev-only@postgres:5432/hydra?sslmode=disable
@@ -41,3 +42,25 @@ services:
 
   certbot:
     profiles: [vm]
+
+  # Monitoring, with `docker compose --profile monitoring up`: Grafana on http://localhost:3030 (admin / dev-only).
+  grafana:
+    env_file: !reset []
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: dev-only
+
+  postgres-exporter:
+    env_file: !reset []
+    environment: &dev-exporter-env
+      DATA_SOURCE_NAME: postgres://postgres_exporter:exporter-dev-only@postgres:5432/postgres?sslmode=disable
+
+  postgres-exporter-db:
+    env_file: !reset []
+    environment:
+      <<: *dev-exporter-env
+      POSTGRES_PASSWORD: dev-only
+
+  # Docker Desktop can't mount / with rslave (Linux can).
+  node-exporter:
+    volumes: !override
+      - /:/host:ro

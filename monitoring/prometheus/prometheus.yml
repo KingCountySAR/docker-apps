@@ -1,0 +1,70 @@
+# What Prometheus collects, every 30 seconds, over the compose network. Nothing here is reachable from outside the VM.
+# Changes apply on `node deploy.mjs vm`, which restarts Prometheus when this folder changes.
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
+
+  # The VM: CPU, memory, disk I/O, filesystems
+  - job_name: node
+    static_configs:
+      - targets: [node-exporter:9100]
+
+  # Each container's CPU, memory, disk and network
+  - job_name: cadvisor
+    static_configs:
+      - targets: [cadvisor:8080]
+
+  # Per-site request counts, response times and status codes, from nginx's log (see ../alloy/config.alloy); also
+  # Alloy's own metrics.
+  - job_name: nginx
+    static_configs:
+      - targets: [alloy:12345]
+    metric_relabel_configs:
+      # Alloy labels its metrics with its own component names too.
+      - regex: component_id|component_path
+        action: labeldrop
+
+  - job_name: postgres
+    static_configs:
+      - targets: [postgres-exporter:9187]
+
+  - job_name: hydra
+    metrics_path: /admin/metrics/prometheus
+    static_configs:
+      - targets: [hydra:4445]
+
+  - job_name: grafana
+    static_configs:
+      - targets: [grafana:3000]
+
+  # Health checks, through blackbox-exporter (see ../blackbox.yml). Each site in nginx/sites/, from outside: DNS, its
+  # certificate (and when it expires), and an answer that isn't an error. sites.json is written on the VM by
+  # bin/site-targets.sh, from nginx/sites/.
+  - job_name: sites
+    metrics_path: /probe
+    params:
+      module: [site]
+    file_sd_configs:
+      - files: [/etc/prometheus/sites.json]
+    relabel_configs: &probe
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # Health checks of the services themselves, inside the VM
+  - job_name: services
+    metrics_path: /probe
+    params:
+      module: [healthy]
+    static_configs:
+      - targets: [http://hydra:4444/health/ready]
+        labels: { service: hydra }
+    relabel_configs: *probe

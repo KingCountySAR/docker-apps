@@ -1,0 +1,12 @@
+# Loads the dashboards in monitoring/grafana/dashboards/ (in git) into the "KCSARA" folder. Edit them here and deploy:
+# changes made in Grafana itself can't be saved over them. To change one in Grafana, save a copy, then export its JSON
+# (Share → Export) back into that folder.
+apiVersion: 1
+providers:
+  - name: kcsara
+    folder: KCSARA
+    type: file
+    allowUiUpdates: false
+    disableDeletion: true
+    options:
+      path: /etc/grafana/dashboards

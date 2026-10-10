@@ -1,0 +1,88 @@
+// Grafana Alloy (https://grafana.com/docs/alloy/): reads nginx's log from Docker and counts each request into
+// per-site metrics, which Prometheus collects from Alloy's own /metrics (port 12345), as:
+//   loki_process_custom_nginx_requests_total{site, status, method}
+//   loki_process_custom_nginx_request_seconds_bucket{site, ...}    total time, as nginx saw it
+//   loki_process_custom_nginx_upstream_seconds_bucket{site, ...}   time the app (Hydra, ...) took
+//   loki_process_custom_nginx_response_bytes_total{site, ...}
+// nginx/nginx.conf writes one JSON line per request. Lines that aren't JSON (nginx's own messages) are skipped.
+// Sending the lines on to Loki later, for searching, is a forward_to in loki.process below.
+
+discovery.docker "nginx" {
+  host = "unix:///var/run/docker.sock"
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.service=nginx"]
+  }
+}
+
+loki.source.docker "nginx" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.docker.nginx.targets
+  forward_to = [loki.process.nginx.receiver]
+}
+
+loki.process "nginx" {
+  stage.drop {
+    expression          = "^[^{]"
+    drop_counter_reason = "not_a_request"
+  }
+
+  stage.json {
+    expressions = {
+      site          = "site",
+      status        = "status",
+      method        = "method",
+      request_time  = "request_time",
+      upstream_time = "upstream_time",
+      bytes         = "bytes",
+    }
+  }
+
+  // Only the methods a site normally gets, so odd ones from scanners don't each make new series.
+  stage.template {
+    source   = "method"
+    template = "{{ if has .Value (list \"GET\" \"HEAD\" \"POST\" \"PUT\" \"PATCH\" \"DELETE\" \"OPTIONS\") }}{{ .Value }}{{ else }}other{{ end }}"
+  }
+
+  stage.labels {
+    values = { site = "", status = "", method = "" }
+  }
+
+  // Only these labels on the metrics (not the container's).
+  stage.label_keep {
+    values = ["site", "status", "method"]
+  }
+
+  stage.metrics {
+    metric.counter {
+      name              = "nginx_requests_total"
+      description       = "Requests nginx answered"
+      match_all         = true
+      action            = "inc"
+      max_idle_duration = "24h"
+    }
+    metric.histogram {
+      name              = "nginx_request_seconds"
+      description       = "Time to answer a request, as nginx saw it"
+      source            = "request_time"
+      buckets           = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30]
+      max_idle_duration = "24h"
+    }
+    metric.histogram {
+      name              = "nginx_upstream_seconds"
+      description       = "Time the app behind nginx took to answer"
+      source            = "upstream_time"
+      buckets           = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30]
+      max_idle_duration = "24h"
+    }
+    metric.counter {
+      name              = "nginx_response_bytes_total"
+      description       = "Bytes sent in response bodies"
+      source            = "bytes"
+      action            = "add"
+      max_idle_duration = "24h"
+    }
+  }
+
+  forward_to = []
+}
