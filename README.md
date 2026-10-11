@@ -223,7 +223,7 @@ A new optional part gets `profiles: [full, <its name>]` on each of its services.
 | Change hydra.yml, nginx/, monitoring/ or compose.yaml | edit here, then `node deploy.mjs vm` (it restarts each service whose own configuration changed) |
 | Open Grafana | `node grafana.mjs`, then http://localhost:3030 |
 | See what's running | `node deploy.mjs status` |
-| See a service's log | `node deploy.mjs logs hydra` (or `postgres`, `nginx`, `certbot`, `grafana`, ...) |
+| See a service's log | `node deploy.mjs logs hydra` (or `postgres`, `nginx`, `certbot`, `grafana`, ...); `logs -f hydra` keeps watching |
 | Upgrade Hydra | change the image tag in `compose.yaml` (read Ory's upgrade notes first), back up the database, `node deploy.mjs vm` |
 | Back up a database | on the VM: `docker compose exec -T postgres pg_dump -U postgres <database> \| gzip > <database>-$(date +%F).sql.gz` (or `pg_dumpall` for all of them) |
 | Open psql as the superuser | `node db.mjs <database>` (like `node db.mjs hydra`; no database for `postgres`). Add psql options after it, like `-c "<sql>"`, or `< file.sql` to run a file |

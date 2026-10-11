@@ -11,7 +11,8 @@ const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-opti
   vm                    Copy compose.yaml, hydra/, nginx/, postgres/, monitoring/, bin/ and the config examples, make
                         any missing secrets, and apply them
   status                What's running
-  logs [service]        The last 200 lines of a service's log (hydra, postgres, nginx, grafana, ...), or all of them
+  logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, nginx, grafana, ...), or all of them;
+                        with -f (--follow), then what's logged after, until Ctrl+C
 
 ${SSH_USAGE}
 
@@ -79,7 +80,9 @@ async function setupVm() {
   await onVm([`bash ${script}`, `rm ${script}`], { tty: true });
 }
 
-const [command, arg] = parseArgs(process.argv.slice(2), USAGE);
+const argv = process.argv.slice(2);
+const follow = argv[0] === 'logs' && ['-f', '--follow'].some(flag => argv.includes(flag));
+const [command, arg] = parseArgs(argv.filter(a => !follow || (a !== '-f' && a !== '--follow')), USAGE);
 switch (command) {
   case 'setup':
     await setupVm();
@@ -91,7 +94,13 @@ switch (command) {
     await onVm([`cd ${ROOT}`, 'docker compose ps']);
     break;
   case 'logs':
-    await onVm([`cd ${ROOT}`, `docker compose logs --tail 200 ${arg ? quote(arg) : ''}`]);
+    if (follow) {
+      // With a terminal on the VM, Ctrl+C stops docker compose there, rather than just this end of ssh; stopping that
+      // way (exit 130) isn't a failure.
+      await onVm([`cd ${ROOT}`, `{ docker compose logs --tail 200 -f ${arg ? quote(arg) : ''} || [ $? -eq 130 ]; }`], { tty: process.stdout.isTTY });
+    } else {
+      await onVm([`cd ${ROOT}`, `docker compose logs --tail 200 ${arg ? quote(arg) : ''}`]);
+    }
     break;
   default:
     fail(USAGE);
