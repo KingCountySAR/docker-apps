@@ -30,6 +30,9 @@ A consolidated/modular system to collect apps and core services for King County 
 - **RAD portal** (profiles `rad` and `full`) at https://rad.kingcountysar.org: the
   [rad-portal](../rad-portal) app, run from its one-file build on `node:22-alpine`. Its MongoDB stays in Atlas. See
   [RAD portal](#rad-portal).
+- **cedar** (profiles `cedar` and `full`) at https://cedar.kingcountysar.org: the [cedar](../cedar) API in front of
+  other KCSARA systems (D4H, ...), for clients with tokens from Hydra. Also run from its one-file build. See
+  [cedar](#cedar).
 - **Monitoring** (profiles `monitoring` and `full`, on by default on the VM): Prometheus collects metrics and Grafana graphs
   them and alerts, from `monitoring/`. See [Monitoring](#monitoring).
 
@@ -55,7 +58,8 @@ whole machine, not each container.
     postgres/, monitoring/, bin/
   .env                           COMPOSE_PROFILES: which profiles run (full, unless changed)
   apps/rad/                      the RAD portal's build, rad-portal.mjs (node deploy.mjs rad)
-  config/                        settings and secrets: certbot.env and rad.env, and postgres.env, hydra.env, grafana.env and
+  apps/cedar/                    cedar's build, cedar.mjs (node deploy.mjs cedar)
+  config/                        settings and secrets: certbot.env, rad.env and cedar.env, and postgres.env, hydra.env, grafana.env and
                                  postgres-exporter.env (made by bin/secrets.sh)
   data/                          everything the services write
     postgres/                    the shared postgres: every app's database
@@ -106,13 +110,18 @@ can be there at once, so the real name's certificate can be ready before switchi
 **Switching the RAD portal to rad.kingcountysar.org**, once its DNS points here: delete the test site's file, run
 `node deploy.mjs vm`, and remove the test name from the Google client's origins and from DNS.
 
+**Switching cedar to cedar.kingcountysar.org** is the same: delete the test site's file, run `node deploy.mjs vm`,
+and remove the test name's DNS record. Its clients change to the new address.
+
 **Switching to jwt.kingcountysar.org**, once its DNS points here:
 
 1. Undo the change to `hydra/hydra.yml` (`git checkout hydra/hydra.yml`), delete the test site's file, and run
    `node deploy.mjs vm`. certbot deletes the test name's certificate within 10 minutes.
 2. Change the apps using it to `https://jwt.kingcountysar.org/` (token URL and issuer). Their tokens from the test
    name stop being accepted, so they get new ones.
-3. Remove the test name's DNS record.
+3. Change `JWT_ISSUER` in `config/cedar.env` on the VM to `https://jwt.kingcountysar.org/`, then
+   `docker compose up -d cedar` there.
+4. Remove the test name's DNS record.
 
 ## RAD portal
 
@@ -131,6 +140,30 @@ Setting it up:
    `../rad-portal/server/dist/rad-portal.mjs` (and its `.map`), or the path you give, and restarts the app.
 5. Point the site's DNS at the VM, and run `node deploy.mjs vm` (see [Testing under another name](#testing-under-another-name)
    for kcsara-rad.kcesar.org).
+
+Health checks ask for its `/health`.
+
+## cedar
+
+The `cedar` service runs `apps/cedar/cedar.mjs` on the VM, built by `npm run build` in the cedar repo. nginx passes
+its sites (`nginx/cedar.inc`) to it at `http://cedar:3040`. Until the first build arrives, it waits. Its routes,
+scopes and settings are in cedar's README.
+
+Setting it up:
+
+1. **Configuration**, on the VM: `cp /srv/kcsara/config/cedar.env.example /srv/kcsara/config/cedar.env` and fill it
+   in: the D4H token and team, and `JWT_ISSUER`, which must be Hydra's issuer exactly as in `hydra/hydra.yml`
+   (`https://kcsara-jwt.kcesar.org/` while Hydra runs under that test name). `node deploy.mjs vm` stops until this
+   file exists.
+2. **The app**: `npm run build` in cedar, then `node deploy.mjs cedar` here. It copies `../cedar/dist/cedar.mjs` (and
+   its `.map`), or the path you give, and restarts the app.
+3. Point the site's DNS at the VM, and run `node deploy.mjs vm` (see [Testing under another name](#testing-under-another-name)
+   for kcsara-cedar.kcesar.org).
+4. **Clients**: make each one in Hydra with the scopes it needs, like
+   `node hydra.mjs create oauth2-client --name "<app>" --grant-type client_credentials --scope d4h:members.read --format json`.
+
+cedar gets Hydra's signing keys from Hydra itself, at `http://hydra:4444` on the compose network (`JWT_URL` in
+`compose.yaml`), not through the internet. Tokens must still name `JWT_ISSUER` as their issuer.
 
 Health checks ask for its `/health`.
 
@@ -253,7 +286,7 @@ When Grafana gets a public site, add `https://<its host>/login/google` to the cl
 ### Choosing what runs
 
 The core (postgres, hydra, nginx, certbot) always runs. Everything else is in profiles: each part in `full` and in its
-own (`monitoring`, `rad`, and each app added later). Profiles only add services, so to leave one part out, list the others
+own (`monitoring`, `rad`, `cedar`, and each app added later). Profiles only add services, so to leave one part out, list the others
 rather than using `full`.
 
 | Command | Runs |
@@ -275,9 +308,10 @@ A new optional part gets `profiles: [full, <its name>]` on each of its services.
 |---|---|
 | Change hydra.yml, nginx/, monitoring/ or compose.yaml | edit here, then `node deploy.mjs vm` (it restarts each service whose own configuration changed) |
 | Deploy a new RAD portal build | `npm run build` in rad-portal, then `node deploy.mjs rad` |
+| Deploy a new cedar build | `npm run build` in cedar, then `node deploy.mjs cedar` |
 | Open Grafana | `node grafana.mjs`, then http://localhost:3030 |
 | See what's running | `node deploy.mjs status` |
-| See a service's log | `node deploy.mjs logs hydra` (or `rad`, `postgres`, `nginx`, `certbot`, `grafana`, ...); `logs -f hydra` keeps watching |
+| See a service's log | `node deploy.mjs logs hydra` (or `rad`, `cedar`, `postgres`, `nginx`, `certbot`, `grafana`, ...); `logs -f hydra` keeps watching |
 | Upgrade Hydra | change the image tag in `compose.yaml` (read Ory's upgrade notes first), back up the database, `node deploy.mjs vm` |
 | Back up a database | on the VM: `docker compose exec -T postgres pg_dump -U postgres <database> \| gzip > <database>-$(date +%F).sql.gz` (or `pg_dumpall` for all of them) |
 | Open psql as the superuser | `node db.mjs <database>` (like `node db.mjs hydra`; no database for `postgres`). Add psql options after it, like `-c "<sql>"`, or `< file.sql` to run a file |

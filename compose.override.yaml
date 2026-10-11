@@ -47,6 +47,10 @@ services:
   rad:
     profiles: !override [vm]
 
+  # So does cedar (`npm run dev` there, with JWT_ISSUER=http://localhost:4444/ for this Hydra).
+  cedar:
+    profiles: !override [vm]
+
   # Monitoring, with `docker compose --profile monitoring up`: Grafana on http://localhost:3030 (admin / dev-only).
   grafana:
     env_file: !reset []

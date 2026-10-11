@@ -98,6 +98,33 @@ services:
     restart: unless-stopped
     init: true
 
+  # cedar (profiles full and cedar), at cedar.kingcountysar.org: an API in front of other KCSARA systems (D4H, ...),
+  # for clients with tokens from Hydra. One file, apps/cedar/cedar.mjs, built by `npm run build` in the cedar repo and
+  # copied here by `node deploy.mjs cedar`. Settings and its D4H token are in config/cedar.env.
+  cedar:
+    image: node:22-alpine
+    profiles: [full, cedar]
+    env_file: ./config/cedar.env
+    environment:
+      NODE_ENV: production
+      PORT: 3040
+      # Hydra's keys, straight from Hydra on this network rather than through the internet and nginx. Tokens must still
+      # name JWT_ISSUER (in config/cedar.env).
+      JWT_URL: http://hydra:4444/
+    volumes:
+      - ./apps/cedar:/app:ro
+    working_dir: /app
+    user: node
+    # Waits for the first `node deploy.mjs cedar`, rather than failing over and over without its file.
+    command: ["sh", "-c", "until [ -f cedar.mjs ]; do sleep 10; done; exec node --enable-source-maps cedar.mjs"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3040/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+    restart: unless-stopped
+    init: true
+
   nginx:
     image: nginx:stable-alpine
     ports:

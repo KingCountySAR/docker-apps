@@ -12,6 +12,7 @@ const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-opti
                         any missing secrets, and apply them
   rad [bundle]          Copy the RAD portal's build (../rad-portal/server/dist/rad-portal.mjs, unless given) to
                         ${ROOT}/apps/rad, and restart it
+  cedar [bundle]        The same for cedar (../cedar/dist/cedar.mjs)
   status                What's running
   logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, nginx, grafana, ...), or all of them;
                         with -f (--follow), then what's logged after, until Ctrl+C
@@ -49,7 +50,7 @@ async function deployVm() {
     `cd ${ROOT}`,
     'rm -rf .incoming',
     // apps/ has each app's build, copied by its own command (like `rad`); made here so docker doesn't make it, as root.
-    `mkdir -p .incoming ${FOLDERS.join(' ')} config apps/rad`,
+    `mkdir -p .incoming ${FOLDERS.join(' ')} config apps/rad apps/cedar`,
     'tar -xz -C .incoming',
     // Replaces the files inside each folder, keeping the folders: a running container's mount of a folder that was
     // removed and made again still shows the old, empty one.
@@ -80,6 +81,7 @@ async function deployVm() {
 // the file it runs, and where the build is, in the app's repo next to this one.
 const APPS = {
   rad: { file: 'rad-portal.mjs', build: ['rad-portal', 'server', 'dist', 'rad-portal.mjs'], repo: 'rad-portal' },
+  cedar: { file: 'cedar.mjs', build: ['cedar', 'dist', 'cedar.mjs'], repo: 'cedar' },
 };
 
 async function deployApp(app, bundle = path.join(here, '..', ...APPS[app].build)) {
@@ -126,6 +128,7 @@ switch (command) {
     await deployVm();
     break;
   case 'rad':
+  case 'cedar':
     await deployApp(command, arg);
     break;
   case 'status':
