@@ -156,7 +156,8 @@ Prometheus collects, every 30 seconds:
 | `blackbox-exporter` | Health checks: each site in `nginx/sites/` over https from the VM (DNS, certificate and its expiry, an answer that isn't a server error), and Hydra's `/health/ready` |
 
 A new site in `nginx/sites/` is checked and graphed without any other change: `bin/site-targets.sh` lists them for
-Prometheus on each deploy.
+Prometheus on each deploy. Each is checked at `/`, unless its file names a better address on a line of its own, like
+Hydra's sites do: `# health: /health/ready`.
 
 **Grafana** is only on the VM's own loopback address. `node grafana.mjs` opens it at http://localhost:3030 through an
 ssh tunnel, until Ctrl+C. Sign in as `admin`, with `GF_SECURITY_ADMIN_PASSWORD` from `config/grafana.env` on the VM.
