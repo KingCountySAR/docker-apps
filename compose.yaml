@@ -74,6 +74,30 @@ services:
       hydra-migrate: { condition: service_completed_successfully }
     restart: unless-stopped
 
+  # The RAD portal (profiles full and rad), at rad.kingcountysar.org: one file, apps/rad/rad-portal.mjs, built by
+  # `npm run build` in the rad-portal repo and copied here by `node deploy.mjs rad`. Its MongoDB is in Atlas
+  # (MONGODB_URI in config/rad.env).
+  rad:
+    image: node:22-alpine
+    profiles: [full, rad]
+    env_file: ./config/rad.env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    volumes:
+      - ./apps/rad:/app:ro
+    working_dir: /app
+    user: node
+    # Waits for the first `node deploy.mjs rad`, rather than failing over and over without its file.
+    command: ["sh", "-c", "until [ -f rad-portal.mjs ]; do sleep 10; done; exec node --enable-source-maps rad-portal.mjs"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+    restart: unless-stopped
+    init: true
+
   nginx:
     image: nginx:stable-alpine
     ports:

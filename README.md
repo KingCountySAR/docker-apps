@@ -27,6 +27,9 @@ A consolidated/modular system to collect apps and core services for King County 
   `/srv/kcsara/config/hydra.env`, which `bin/secrets.sh` makes.
   - Machine-to-machine tokens only (`client_credentials`). There's no login and consent app, and none is planned:
   hydra.yml leaves `urls.login` and `urls.consent` at Hydra's defaults.
+- **RAD portal** (profiles `rad` and `full`) at https://rad.kingcountysar.org: the
+  [rad-portal](../rad-portal) app, run from its one-file build on `node:22-alpine`. Its MongoDB stays in Atlas. See
+  [RAD portal](#rad-portal).
 - **Monitoring** (profiles `monitoring` and `full`, on by default on the VM): Prometheus collects metrics and Grafana graphs
   them and alerts, from `monitoring/`. See [Monitoring](#monitoring).
 
@@ -51,7 +54,8 @@ whole machine, not each container.
   compose.yaml, hydra/, nginx/,  from this repo (node deploy.mjs vm); nginx/ includes certbot's script
     postgres/, monitoring/, bin/
   .env                           COMPOSE_PROFILES: which profiles run (full, unless changed)
-  config/                        settings and secrets: certbot.env, and postgres.env, hydra.env, grafana.env and
+  apps/rad/                      the RAD portal's build, rad-portal.mjs (node deploy.mjs rad)
+  config/                        settings and secrets: certbot.env and rad.env, and postgres.env, hydra.env, grafana.env and
                                  postgres-exporter.env (made by bin/secrets.sh)
   data/                          everything the services write
     postgres/                    the shared postgres: every app's database
@@ -90,13 +94,17 @@ whole machine, not each container.
 
 Test names stay out of git, as uncommitted changes in your working files (which is what `node deploy.mjs vm` sends):
 
-1. Copy `nginx/sites/jwt.kingcountysar.org.conf` to `nginx/sites/<test name>.conf` and change the three names in it.
+1. Copy the site's file (like `nginx/sites/jwt.kingcountysar.org.conf`) to `nginx/sites/<test name>.conf` and change
+   the three names in it.
    Add that file to `.git/info/exclude`, which keeps it out of git without naming it in `.gitignore`.
-2. Change `urls.self.issuer` in `hydra/hydra.yml` to `https://<test name>/`. Don't commit that change.
+2. For Hydra only: change `urls.self.issuer` in `hydra/hydra.yml` to `https://<test name>/`. Don't commit that change.
 3. Point the test name's DNS at the VM, then `node deploy.mjs vm`.
 
 Hydra has one issuer at a time, and clients check it, so tokens from one name aren't accepted for another. Both sites
 can be there at once, so the real name's certificate can be ready before switching.
+
+**Switching the RAD portal to rad.kingcountysar.org**, once its DNS points here: delete the test site's file, run
+`node deploy.mjs vm`, and remove the test name from the Google client's origins and from DNS.
 
 **Switching to jwt.kingcountysar.org**, once its DNS points here:
 
@@ -105,6 +113,26 @@ can be there at once, so the real name's certificate can be ready before switchi
 2. Change the apps using it to `https://jwt.kingcountysar.org/` (token URL and issuer). Their tokens from the test
    name stop being accepted, so they get new ones.
 3. Remove the test name's DNS record.
+
+## RAD portal
+
+The `rad` service runs `apps/rad/rad-portal.mjs` on the VM, the whole app in one file from `npm run build` in the
+rad-portal repo. nginx passes its sites (`nginx/rad.inc`) to it at `http://rad:3000`. Until the first build arrives,
+it waits.
+
+Setting it up:
+
+1. **Configuration**, on the VM: `cp /srv/kcsara/config/rad.env.example /srv/kcsara/config/rad.env` and fill it in.
+   `node deploy.mjs vm` stops until this file exists.
+2. **Atlas**: add the VM's public IP to the cluster's IP access list.
+3. **Google**: add `https://rad.kingcountysar.org` (and the test name's https address) to the OAuth client's
+   Authorized JavaScript origins.
+4. **The app**: `npm run build` in rad-portal, then `node deploy.mjs rad` here. It copies
+   `../rad-portal/server/dist/rad-portal.mjs` (and its `.map`), or the path you give, and restarts the app.
+5. Point the site's DNS at the VM, and run `node deploy.mjs vm` (see [Testing under another name](#testing-under-another-name)
+   for kcsara-rad.kcesar.org).
+
+Health checks ask for its `/health`.
 
 ## Removing a site
 
@@ -225,13 +253,14 @@ When Grafana gets a public site, add `https://<its host>/login/google` to the cl
 ### Choosing what runs
 
 The core (postgres, hydra, nginx, certbot) always runs. Everything else is in profiles: each part in `full` and in its
-own (`monitoring`, and each app added later). Profiles only add services, so to leave one part out, list the others
+own (`monitoring`, `rad`, and each app added later). Profiles only add services, so to leave one part out, list the others
 rather than using `full`.
 
 | Command | Runs |
 |---|---|
 | `docker compose --profile full up` | everything |
 | `docker compose --profile monitoring up` | the core and monitoring |
+| `docker compose --profile monitoring --profile rad up` | the core, monitoring and the RAD portal |
 | `docker compose up` | only the core |
 
 On the VM, `COMPOSE_PROFILES` in `/srv/kcsara/.env` picks the profiles for every `docker compose` command there, comma
@@ -245,9 +274,10 @@ A new optional part gets `profiles: [full, <its name>]` on each of its services.
 | To | Run |
 |---|---|
 | Change hydra.yml, nginx/, monitoring/ or compose.yaml | edit here, then `node deploy.mjs vm` (it restarts each service whose own configuration changed) |
+| Deploy a new RAD portal build | `npm run build` in rad-portal, then `node deploy.mjs rad` |
 | Open Grafana | `node grafana.mjs`, then http://localhost:3030 |
 | See what's running | `node deploy.mjs status` |
-| See a service's log | `node deploy.mjs logs hydra` (or `postgres`, `nginx`, `certbot`, `grafana`, ...); `logs -f hydra` keeps watching |
+| See a service's log | `node deploy.mjs logs hydra` (or `rad`, `postgres`, `nginx`, `certbot`, `grafana`, ...); `logs -f hydra` keeps watching |
 | Upgrade Hydra | change the image tag in `compose.yaml` (read Ory's upgrade notes first), back up the database, `node deploy.mjs vm` |
 | Back up a database | on the VM: `docker compose exec -T postgres pg_dump -U postgres <database> \| gzip > <database>-$(date +%F).sql.gz` (or `pg_dumpall` for all of them) |
 | Open psql as the superuser | `node db.mjs <database>` (like `node db.mjs hydra`; no database for `postgres`). Add psql options after it, like `-c "<sql>"`, or `< file.sql` to run a file |

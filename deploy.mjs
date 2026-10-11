@@ -10,6 +10,8 @@ const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-opti
   setup                 Install Docker and create ${ROOT} on a fresh VM (asks for your sudo password)
   vm                    Copy compose.yaml, hydra/, nginx/, postgres/, monitoring/, bin/ and the config examples, make
                         any missing secrets, and apply them
+  rad [bundle]          Copy the RAD portal's build (../rad-portal/server/dist/rad-portal.mjs, unless given) to
+                        ${ROOT}/apps/rad, and restart it
   status                What's running
   logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, nginx, grafana, ...), or all of them;
                         with -f (--follow), then what's logged after, until Ctrl+C
@@ -46,7 +48,8 @@ async function deployVm() {
   await onVm([
     `cd ${ROOT}`,
     'rm -rf .incoming',
-    `mkdir -p .incoming ${FOLDERS.join(' ')} config`,
+    // apps/ has each app's build, copied by its own command (like `rad`); made here so docker doesn't make it, as root.
+    `mkdir -p .incoming ${FOLDERS.join(' ')} config apps/rad`,
     'tar -xz -C .incoming',
     // Replaces the files inside each folder, keeping the folders: a running container's mount of a folder that was
     // removed and made again still shows the old, empty one.
@@ -73,6 +76,38 @@ async function deployVm() {
   ], { files: ['compose.yaml', ...FOLDERS, ...examples], cwd: here });
 }
 
+// Apps that run from one built file, copied to apps/<name>/ by `node deploy.mjs <name>`: the service in compose.yaml,
+// the file it runs, and where the build is, in the app's repo next to this one.
+const APPS = {
+  rad: { file: 'rad-portal.mjs', build: ['rad-portal', 'server', 'dist', 'rad-portal.mjs'], repo: 'rad-portal' },
+};
+
+async function deployApp(app, bundle = path.join(here, '..', ...APPS[app].build)) {
+  const { file, repo } = APPS[app];
+  bundle = path.resolve(bundle);
+  if (!fs.existsSync(bundle)) fail(`No ${bundle}. Run \`npm run build\` in ${repo} first, or give the bundle's path.`);
+  const name = path.basename(bundle);
+  const files = [name, ...(fs.existsSync(`${bundle}.map`) ? [`${name}.map`] : [])];
+  console.log(`Deploying ${bundle} to ${ROOT}/apps/${app}`);
+  await onVm([
+    `mkdir -p ${ROOT}/apps/${app}`,
+    `cd ${ROOT}/apps/${app}`,
+    'rm -rf .incoming',
+    'mkdir .incoming',
+    'tar -xz -C .incoming',
+    // Moved into place whole, under the name compose.yaml runs, so the app never starts from a half-copied file.
+    `mv -f .incoming/${quote(name)} ${file}`,
+    `{ [ ! -f .incoming/${quote(`${name}.map`)} ] || mv -f .incoming/${quote(`${name}.map`)} ${file}.map; }`,
+    'rm -rf .incoming',
+    `cd ${ROOT}`,
+    `{ [ -f config/${app}.env ] || { echo 'Copied. Before it can start, create ${ROOT}/config/${app}.env from ${app}.env.example next to it, then run node deploy.mjs vm.'; exit 0; }; }`,
+    // Restarts it with the new file if it's running; otherwise it starts with the next `node deploy.mjs vm` (with its
+    // profile on).
+    `{ [ -z "$(docker compose ps -q ${app} 2> /dev/null)" ] || docker compose restart ${app}; }`,
+    'docker compose ps',
+  ], { files, cwd: path.dirname(bundle) });
+}
+
 async function setupVm() {
   // Copied over first, then run with a terminal, so sudo can ask for your password.
   const script = '/tmp/kcsara-setup-vm.sh';
@@ -89,6 +124,9 @@ switch (command) {
     break;
   case 'vm':
     await deployVm();
+    break;
+  case 'rad':
+    await deployApp(command, arg);
     break;
   case 'status':
     await onVm([`cd ${ROOT}`, 'docker compose ps']);

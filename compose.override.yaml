@@ -43,6 +43,10 @@ services:
   certbot:
     profiles: [vm]
 
+  # The RAD portal runs from its own repo on a dev machine (`npm run dev` there).
+  rad:
+    profiles: !override [vm]
+
   # Monitoring, with `docker compose --profile monitoring up`: Grafana on http://localhost:3030 (admin / dev-only).
   grafana:
     env_file: !reset []
