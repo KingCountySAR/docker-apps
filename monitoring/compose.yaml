@@ -75,7 +75,9 @@ services:
   # Each container's CPU, memory, disk and network, labelled by compose service.
   cadvisor:
     profiles: [full, monitoring]
-    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    # v0.54 or later: Docker 29's containerd image store (the overlayfs snapshotter) hides every container from older
+    # ones. Images are on ghcr.io from v0.54 (gcr.io before).
+    image: ghcr.io/google/cadvisor:v0.60.6
     command:
       - --docker_only=true
       - --housekeeping_interval=30s
