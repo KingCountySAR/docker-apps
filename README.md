@@ -121,8 +121,32 @@ certificate within 10 minutes (putting the file back gets a new one).
 | List clients | `node hydra.mjs list oauth2-clients` |
 | Add a machine-to-machine client | `node hydra.mjs create oauth2-client --name "<app>" --grant-type client_credentials --scope <scopes> --format json` |
 | See or delete one | `node hydra.mjs get oauth2-client <id>`, `node hydra.mjs delete oauth2-client <id>` |
+| Change a client's scopes, or give it a new secret | see [Changing a client](#changing-a-client) |
 
 The client secret is shown only when the client is created: copy it to the app's configuration then.
+
+### Changing a client
+
+`hydra update oauth2-client` replaces the whole client: every flag you leave out goes back to its default. With only
+`--scope`, the client loses its name and its `client_credentials` grant, and stops getting tokens. So change a client
+by saving it to a file, editing that, and sending the whole file back:
+
+1. Save it: `node hydra.mjs get oauth2-client <id> --format json-pretty > client.json`
+2. Edit `client.json`:
+   - **Scopes**: `"scope"` is one string with the scopes separated by spaces, like `"scope": "read write"`. Tokens
+     already issued keep their old scopes until they expire.
+   - **A new secret**: add `"client_secret": "<new secret>"`. Make one with
+     `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. The file has no secret otherwise
+     (Hydra keeps only a hash), and without one the client keeps its current secret.
+3. Send it back: `node hydra.mjs update oauth2-client <id> --file /dev/stdin < client.json`. In PowerShell, where
+   `<` doesn't work: `Get-Content client.json | node hydra.mjs update oauth2-client <id> --file /dev/stdin`.
+4. Delete `client.json` if it has a secret in it.
+
+A client has one secret at a time, so the old one stops working as soon as the new one is set, and the app gets
+errors until its configuration has the new one. To change it without a gap, make a second client with the same scopes
+(and audience), move the app to it, and then delete the old client.
+
+Use PowerShell 7 (`pwsh`) for step 1: Windows PowerShell 5's `>` writes UTF-16, which Hydra can't read back.
 
 Apps on the VM in another compose project can join the `kcsara` network (see `compose.yaml`) and call Hydra at
 `http://hydra:4444` (public) and `http://hydra:4445` (admin), without going through nginx.
