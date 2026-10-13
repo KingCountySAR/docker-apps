@@ -84,6 +84,11 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
+      # Members' D4H qualifications come from cedar, with a client_credentials token from Hydra (its client is
+      # CEDAR_CLIENT_ID and CEDAR_CLIENT_SECRET in config/rad.env). Both straight over this network, not the internet:
+      # the portal only uses JWT_ISSUER for the token address (<issuer>oauth2/token).
+      JWT_ISSUER: http://hydra:4444/
+      CEDAR_URL: http://cedar:3040
     volumes:
       - ./apps/rad:/app:ro
     working_dir: /app
