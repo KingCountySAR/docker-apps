@@ -42,6 +42,15 @@ scrape_configs:
     static_configs:
       - targets: [grafana:3000]
 
+  # Each app's own metrics, from containers with a kcsara.metrics label (the port and path, like 3000/metrics); the
+  # site-targets service lists them in metrics.json (see bin/site-targets.sh), labelled with app and service.
+  - job_name: apps
+    # Prometheus's text format when an app's /metrics doesn't say what it sends (no Content-Type), as one written by
+    # hand might not.
+    fallback_scrape_protocol: PrometheusText0.0.4
+    file_sd_configs:
+      - files: [/targets/metrics.json]
+
   # Health checks, through blackbox-exporter (see ../blackbox.yml). Each site, from outside: DNS, its certificate (and
   # when it expires), and an answer that isn't an error. The site-targets service writes sites.json from the
   # containers' labels (see bin/site-targets.sh).

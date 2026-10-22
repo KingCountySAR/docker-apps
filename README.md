@@ -72,6 +72,8 @@ whole machine, not each container.
   apps/cedar/                    cedar's build, cedar.mjs (node deploy.mjs cedar)
   apps/reports/                  the reports' build, db-reporting.mjs (node deploy.mjs reports)
   apps/respond/                  Respond's build folder, current/ (and the one before, previous/) (node deploy.mjs respond)
+  apps/<name>/                   an app with its own compose.yaml (node deploy.mjs app <repo>): current/ (and
+                                 previous/), and its own config/ (see "Apps with their own compose.yaml")
   config/                        settings and secrets: caddy.env, rad.env, cedar.env, reports.env and respond.env, and
                                  postgres.env, hydra.env, reports-db.env, respond-db.env, grafana.env and
                                  postgres-exporter.env (made by bin/secrets.sh)
@@ -82,7 +84,8 @@ whole machine, not each container.
     grafana/                     Grafana's users, settings and alert state
 ```
 
-`config/` and `data/` are all there is to back up; everything else comes from this repo.
+`config/`, `data/` and each `apps/<name>/config/` are all there is to back up; everything else comes from this repo
+or the apps' repos.
 
 ## First-time setup
 
@@ -259,6 +262,78 @@ Health checks ask for its `/health`.
 Take its service's `caddy` labels out (or the service), run `node deploy.mjs vm`, and remove its DNS record. Caddy
 stops serving it at once; its certificate is left to expire.
 
+## Apps with their own compose.yaml
+
+An app can bring its own `compose.yaml` instead of being a service here. It runs as its own compose project, on the
+`kcsara` network, and gets its site, health checks, metrics and database from this VM the same way. Nothing here
+changes when it's added or deployed.
+
+**In the app's repo**, a `deploy/` folder:
+
+```
+deploy/
+  app.json       { "name": "reports", "files": ["server/dist/db-reporting.mjs", "server/dist/db-reporting.mjs.map"] }
+  compose.yaml
+```
+
+`name` is the app's name on the VM (lower case letters, digits and `-`). `files` are its build's files or folders,
+paths in the repo, which arrive next to `compose.yaml` under their own names, with everything else in `deploy/`.
+`compose.yaml` is an ordinary compose file, with paths from its own folder:
+
+```yaml
+services:
+  reports:                          # unique on the VM: it's also its name on the kcsara network
+    image: node:22-alpine
+    env_file: [../config/database.env, ../config/app.env]
+    volumes: [./:/app:ro]
+    working_dir: /app
+    user: node
+    command: [node, --enable-source-maps, db-reporting.mjs]
+    labels:
+      caddy: ${HOSTS:-reports.kingcountysar.org}
+      caddy.import: site
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+      kcsara.health: /health          # checked over https from the VM
+      kcsara.metrics: 3000/metrics    # optional: collected by Prometheus (the apps job), labelled app and service
+    restart: unless-stopped
+    init: true
+
+networks:
+  default:
+    name: kcsara
+    external: true
+```
+
+Its other services (a nightly job, ...) go in the same file. `../config/` is the app's own folder of settings on the
+VM, kept between deploys; `${...}` variables come from `config/compose.env` there, if any (like `HOSTS=` on a test VM).
+
+**On the VM** it lives in `/srv/kcsara/apps/<name>/`: `current/` (what was sent), `previous/` (the deploy before) and
+`config/`. Setting one up:
+
+1. **Database**, if it needs one: `node deploy.mjs database <name>`. It makes `config/database.env` there, with
+   `DATABASE_URL=postgres://<database>:<password>@postgres:5432/<database>` (the database is the name with `_` for
+   `-`, or `node deploy.mjs database <name> <database>`), and the user and database in the shared postgres. Each
+   deploy brings them up to date, so to change the password, edit the file and deploy.
+2. **Settings**: whatever else its `compose.yaml` names in `../config/`, made by hand on the VM, like
+   `/srv/kcsara/apps/<name>/config/app.env`.
+3. **Deploy**: build it, then `node deploy.mjs app ../<repo>`. On the VM, `bin/deploy-app.sh` checks what arrived (the
+   name in `app.json`, and that compose can read `compose.yaml` with its config files there), brings the database up
+   to date, swaps it in as `current/`, and recreates its containers. When the check fails, nothing changes.
+4. **DNS** for its host names, pointed at the VM. Caddy finds its labels and gets a certificate by itself.
+
+To go back to the deploy before, on the VM: in `apps/<name>/`, swap `current` and `previous`
+(`mv current x && mv previous current && mv x previous`), then `docker compose up -d --force-recreate` in `current`.
+Its log: `docker compose logs` in `current`.
+
+**From GitHub** (not set up yet): a workflow builds the app and sends the same tar over ssh, with a key that can do
+nothing but deploy that one app. In the deploying user's `~/.ssh/authorized_keys` on the VM:
+
+```
+command="sh /srv/kcsara/bin/deploy-app.sh reports",restrict ssh-ed25519 AAAA... reports-deploy
+```
+
+The key's private half and the VM's address go in the repo's GitHub secrets.
+
 ## Running Hydra commands
 
 `node hydra.mjs <command>` runs `hydra <command>` in the hydra container on the VM, against the admin API.
@@ -311,8 +386,8 @@ For an app that uses the shared postgres (`<app>` is its name):
 3. `node deploy.mjs vm`. `<app>-db` creates the user and database, and on every start sets the user's password to
    the one in the URL: to change it, change the URL and run `docker compose up -d` on the VM.
 
-An app in a separate compose project uses it the same way: join the `kcsara` network and connect to `postgres:5432`.
-Its `<app>-db` service still goes here.
+An app with its own compose.yaml gets one with `node deploy.mjs database <name>` instead (see
+[Apps with their own compose.yaml](#apps-with-their-own-composeyaml)).
 
 ## Monitoring
 
@@ -326,10 +401,12 @@ Prometheus collects, every 30 seconds:
 | `postgres-exporter` | Postgres's connections, database sizes and activity, as a read-only `postgres_exporter` user |
 | `hydra` | Hydra's own request counts and times, per endpoint |
 | `blackbox-exporter` | Health checks: each site over https from the VM (DNS, certificate and its expiry, an answer that isn't a server error), and Hydra's `/health/ready` |
+| apps (the `apps` job) | Each app's own metrics, from containers with a `kcsara.metrics` label, labelled `app` and `service` |
 
 A new site is checked and graphed without any other change: the `site-targets` service (`bin/site-targets.sh`)
 lists, every minute, each host name in a container's `caddy` label at the path in its `kcsara.health` label (like
-`/health/ready` for Hydra). A container without `kcsara.health` isn't checked.
+`/health/ready` for Hydra). A container without `kcsara.health` isn't checked. It lists the containers with a
+`kcsara.metrics` label (a port and path, like `3000/metrics`) the same way, for the apps job.
 
 **Grafana** is only on the VM's own loopback address. `node grafana.mjs` opens it at http://localhost:3030 through an
 ssh tunnel, until Ctrl+C. Sign in as `admin`, with `GF_SECURITY_ADMIN_PASSWORD` from `config/grafana.env` on the VM.
@@ -398,6 +475,7 @@ A new optional part gets `profiles: [full, <its name>]` on each of its services.
 | Deploy a new cedar build | `npm run build` in cedar, then `node deploy.mjs cedar` |
 | Deploy a new reports build | `npm run build` in db-reporting, then `node deploy.mjs reports` |
 | Deploy a new Respond build | `npm run build` in respond-sync, then `node deploy.mjs respond` |
+| Deploy an app with its own compose.yaml | build it, then `node deploy.mjs app ../<repo>` (see [Apps with their own compose.yaml](#apps-with-their-own-composeyaml)) |
 | Import Respond organizations | `node deploy.mjs seed-respond <file>` (see [Respond](#respond)) |
 | Import respond-next's activities into Respond | `node deploy.mjs import-respond <folder> [--dry-run]` (see [Respond](#respond)) |
 | Open Grafana | `node grafana.mjs`, then http://localhost:3030 |

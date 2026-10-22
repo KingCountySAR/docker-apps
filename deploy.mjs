@@ -2,6 +2,7 @@
 // Sets up the VM and copies this folder's files to it, from Windows, macOS or Linux. See lib/vm.mjs for the settings
 // (DEPLOY_HOST and such, in .env).
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { ROOT, SSH_USAGE, fail, here, onVm, parseArgs, quote, sendFile } from './lib/vm.mjs';
 
@@ -23,6 +24,12 @@ const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-opti
                         *.activities.json and *.locations.json) into Respond's database, skipping those already there,
                         and restart it. Seed the organizations, with their legacyId, first. With --dry-run, only say
                         what it would import. The files stay off the VM's disk, as with seed-respond
+  app <repo>            Deploy an app that brings its own compose.yaml: its repo's deploy/ folder, and the build
+                        files its deploy/app.json lists, to ${ROOT}/apps/<name> (see "Apps with their own
+                        compose.yaml" in the README). Build it first
+  database <name> [database]
+                        Give such an app a database and user in the shared postgres, with its URL in
+                        ${ROOT}/apps/<name>/config/database.env. The database is the name with _ for -, unless given
   status                What's running
   logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, caddy, grafana, ...), or all of them;
                         with -f (--follow), then what's logged after, until Ctrl+C
@@ -186,6 +193,44 @@ async function importRespond(folder, dryRun) {
   ], { files, cwd: folder });
 }
 
+// Apps that bring their own compose.yaml, in a deploy/ folder in their repo, with app.json:
+//   { "name": "reports", "files": ["server/dist/db-reporting.mjs", "server/dist/db-reporting.mjs.map"] }
+// The files (or folders) are paths in the repo, sent next to compose.yaml under their own names. On the VM,
+// bin/deploy-app.sh does the rest, which a GitHub workflow can run the same way.
+async function deployComposeApp(repo) {
+  if (!repo) fail(`Give the app's repo: node deploy.mjs app <repo>\n\n${USAGE}`);
+  repo = path.resolve(repo);
+  const deployDir = path.join(repo, 'deploy');
+  const manifest = path.join(deployDir, 'app.json');
+  let app;
+  try {
+    app = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+  } catch (err) {
+    fail(`${manifest}: ${err.message}`);
+  }
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(app.name ?? '') || app.name === 'kcsara') fail(`${manifest}: "name" must be lower case letters, digits and -, not kcsara.`);
+  if (!fs.existsSync(path.join(deployDir, 'compose.yaml'))) fail(`No ${path.join(deployDir, 'compose.yaml')}.`);
+  const files = (app.files ?? []).map(file => path.resolve(repo, file));
+  const names = [...fs.readdirSync(deployDir), ...files.map(file => path.basename(file))];
+  const twice = names.find((name, i) => names.indexOf(name) !== i);
+  if (twice) fail(`${manifest}: two files would be ${twice}.`);
+  const missing = files.find(file => !fs.existsSync(file));
+  if (missing) fail(`No ${missing}. Build ${app.name} first.`);
+
+  // All in one folder, sent as one tar.
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'kcsara-app-'));
+  process.on('exit', () => fs.rmSync(staging, { recursive: true, force: true }));
+  fs.cpSync(deployDir, staging, { recursive: true });
+  for (const file of files) fs.cpSync(file, path.join(staging, path.basename(file)), { recursive: true });
+  console.log(`Deploying ${repo} to ${ROOT}/apps/${app.name}`);
+  await onVm([`sh ${ROOT}/bin/deploy-app.sh ${app.name}`], { files: fs.readdirSync(staging), cwd: staging });
+}
+
+async function appDatabase(app, database) {
+  if (!app) fail(`Give the app's name: node deploy.mjs database <name> [database]\n\n${USAGE}`);
+  await onVm([`sh ${ROOT}/bin/app-database.sh ${quote(app)}${database ? ` ${quote(database)}` : ''}`]);
+}
+
 async function setupVm() {
   // Copied over first, then run with a terminal, so sudo can ask for your password.
   const script = '/tmp/kcsara-setup-vm.sh';
@@ -196,7 +241,7 @@ async function setupVm() {
 const argv = process.argv.slice(2);
 const follow = argv[0] === 'logs' && ['-f', '--follow'].some(flag => argv.includes(flag));
 const dryRun = argv[0] === 'import-respond' && argv.includes('--dry-run');
-const [command, arg] = parseArgs(argv.filter(a => !(follow && (a === '-f' || a === '--follow')) && !(dryRun && a === '--dry-run')), USAGE);
+const [command, arg, arg2] = parseArgs(argv.filter(a => !(follow && (a === '-f' || a === '--follow')) && !(dryRun && a === '--dry-run')), USAGE);
 switch (command) {
   case 'setup':
     await setupVm();
@@ -217,6 +262,12 @@ switch (command) {
     break;
   case 'import-respond':
     await importRespond(arg, dryRun);
+    break;
+  case 'app':
+    await deployComposeApp(arg);
+    break;
+  case 'database':
+    await appDatabase(arg, arg2);
     break;
   case 'status':
     await onVm([`cd ${ROOT}`, 'docker compose ps']);

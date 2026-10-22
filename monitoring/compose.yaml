@@ -50,7 +50,7 @@ services:
       prometheus: { condition: service_started }
     restart: unless-stopped
 
-  # Lists the sites for Prometheus's health checks, from the caddy and kcsara.health labels on Docker's containers
+  # Lists the sites for Prometheus's health checks, and the containers with metrics, from labels on Docker's containers
   # (see bin/site-targets.sh). Docker's socket is mounted read-only, but anything with it can use all of Docker's API.
   site-targets:
     profiles: [full, monitoring]
@@ -145,5 +145,5 @@ services:
 
 volumes:
   alloy-data:
-  # sites.json, written by site-targets and read by Prometheus
+  # sites.json and metrics.json, written by site-targets and read by Prometheus
   site-targets:
