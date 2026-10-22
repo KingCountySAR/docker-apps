@@ -1,7 +1,7 @@
 {
   "uid": "kcsara-sites",
   "title": "Sites",
-  "description": "Each site's traffic through nginx: requests, errors and response times",
+  "description": "Each site's traffic through Caddy: requests, errors and response times",
   "tags": [
     "kcsara"
   ],
@@ -25,10 +25,10 @@
           "uid": "prometheus"
         },
         "query": {
-          "query": "label_values(loki_process_custom_nginx_requests_total, site)",
+          "query": "label_values(loki_process_custom_site_requests_total, site)",
           "refId": "site"
         },
-        "definition": "label_values(loki_process_custom_nginx_requests_total, site)",
+        "definition": "label_values(loki_process_custom_site_requests_total, site)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
@@ -68,7 +68,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(loki_process_custom_nginx_requests_total{site=~\"$site\"}[$__rate_interval]))",
+          "expr": "sum(rate(loki_process_custom_site_requests_total{site=~\"$site\"}[$__rate_interval]))",
           "legendFormat": "",
           "instant": true
         }
@@ -126,7 +126,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "100 * (sum(rate(loki_process_custom_nginx_requests_total{site=~\"$site\",status=~\"4..\"}[$__rate_interval])) or vector(0)) / sum(rate(loki_process_custom_nginx_requests_total{site=~\"$site\"}[$__rate_interval]))",
+          "expr": "100 * (sum(rate(loki_process_custom_site_requests_total{site=~\"$site\",status=~\"4..\"}[$__rate_interval])) or vector(0)) / sum(rate(loki_process_custom_site_requests_total{site=~\"$site\"}[$__rate_interval]))",
           "legendFormat": "",
           "instant": true
         }
@@ -192,7 +192,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "100 * (sum(rate(loki_process_custom_nginx_requests_total{site=~\"$site\",status=~\"5..\"}[$__rate_interval])) or vector(0)) / sum(rate(loki_process_custom_nginx_requests_total{site=~\"$site\"}[$__rate_interval]))",
+          "expr": "100 * (sum(rate(loki_process_custom_site_requests_total{site=~\"$site\",status=~\"5..\"}[$__rate_interval])) or vector(0)) / sum(rate(loki_process_custom_site_requests_total{site=~\"$site\"}[$__rate_interval]))",
           "legendFormat": "",
           "instant": true
         }
@@ -258,7 +258,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(loki_process_custom_nginx_request_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(loki_process_custom_site_request_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
           "legendFormat": "",
           "instant": true
         }
@@ -329,7 +329,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (site) (rate(loki_process_custom_nginx_requests_total{site=~\"$site\"}[$__rate_interval]))",
+          "expr": "sum by (site) (rate(loki_process_custom_site_requests_total{site=~\"$site\"}[$__rate_interval]))",
           "legendFormat": "{{site}}"
         }
       ],
@@ -380,7 +380,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (status) (rate(loki_process_custom_nginx_requests_total{site=~\"$site\"}[$__rate_interval]))",
+          "expr": "sum by (status) (rate(loki_process_custom_site_requests_total{site=~\"$site\"}[$__rate_interval]))",
           "legendFormat": "{{status}}"
         }
       ],
@@ -431,7 +431,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (site) (rate(loki_process_custom_nginx_requests_total{site=~\"$site\",status=~\"4..\"}[$__rate_interval]))",
+          "expr": "sum by (site) (rate(loki_process_custom_site_requests_total{site=~\"$site\",status=~\"4..\"}[$__rate_interval]))",
           "legendFormat": "{{site}}"
         }
       ],
@@ -482,7 +482,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (site) (rate(loki_process_custom_nginx_requests_total{site=~\"$site\",status=~\"5..\"}[$__rate_interval]))",
+          "expr": "sum by (site) (rate(loki_process_custom_site_requests_total{site=~\"$site\",status=~\"5..\"}[$__rate_interval]))",
           "legendFormat": "{{site}}"
         }
       ],
@@ -522,7 +522,7 @@
     {
       "type": "timeseries",
       "title": "Response time (median and 95th percentile)",
-      "description": "From nginx receiving the request to sending the last byte",
+      "description": "From Caddy receiving the request to sending the last byte",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -534,7 +534,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum by (le, site) (rate(loki_process_custom_nginx_request_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le, site) (rate(loki_process_custom_site_request_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
           "legendFormat": "{{site}} median"
         },
         {
@@ -543,7 +543,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, site) (rate(loki_process_custom_nginx_request_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, site) (rate(loki_process_custom_site_request_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
           "legendFormat": "{{site}} 95%"
         }
       ],
@@ -583,7 +583,7 @@
     {
       "type": "timeseries",
       "title": "App's response time (95th percentile)",
-      "description": "Time the app behind nginx (Hydra, ...) took to answer",
+      "description": "Time the app behind Caddy (Hydra, ...) took to answer",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -595,7 +595,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, site) (rate(loki_process_custom_nginx_upstream_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, site) (rate(loki_process_custom_site_upstream_seconds_bucket{site=~\"$site\"}[$__rate_interval])))",
           "legendFormat": "{{site}}"
         }
       ],
@@ -646,7 +646,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (site) (rate(loki_process_custom_nginx_response_bytes_total{site=~\"$site\"}[$__rate_interval]))",
+          "expr": "sum by (site) (rate(loki_process_custom_site_response_bytes_total{site=~\"$site\"}[$__rate_interval]))",
           "legendFormat": "{{site}}"
         }
       ],
@@ -697,7 +697,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (method) (rate(loki_process_custom_nginx_requests_total{site=~\"$site\"}[$__rate_interval]))",
+          "expr": "sum by (method) (rate(loki_process_custom_site_requests_total{site=~\"$site\"}[$__rate_interval]))",
           "legendFormat": "{{method}}"
         }
       ],

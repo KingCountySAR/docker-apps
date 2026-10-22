@@ -19,9 +19,9 @@ scrape_configs:
     static_configs:
       - targets: [cadvisor:8080]
 
-  # Per-site request counts, response times and status codes, from nginx's log (see ../alloy/config.alloy); also
+  # Per-site request counts, response times and status codes, from Caddy's log (see ../alloy/config.alloy); also
   # Alloy's own metrics.
-  - job_name: nginx
+  - job_name: alloy
     static_configs:
       - targets: [alloy:12345]
     metric_relabel_configs:
@@ -42,15 +42,15 @@ scrape_configs:
     static_configs:
       - targets: [grafana:3000]
 
-  # Health checks, through blackbox-exporter (see ../blackbox.yml). Each site in nginx/sites/, from outside: DNS, its
-  # certificate (and when it expires), and an answer that isn't an error. sites.json is written on the VM by
-  # bin/site-targets.sh, from nginx/sites/.
+  # Health checks, through blackbox-exporter (see ../blackbox.yml). Each site, from outside: DNS, its certificate (and
+  # when it expires), and an answer that isn't an error. The site-targets service writes sites.json from the
+  # containers' labels (see bin/site-targets.sh).
   - job_name: sites
     metrics_path: /probe
     params:
       module: [site]
     file_sd_configs:
-      - files: [/etc/prometheus/sites.json]
+      - files: [/etc/prometheus/targets/sites.json]
     relabel_configs: &probe
       - source_labels: [__address__]
         target_label: __param_target

@@ -1,4 +1,4 @@
-# For running Hydra on a dev machine, without nginx or certificates: `docker compose up` in this folder. Compose reads
+# For running Hydra on a dev machine, without Caddy or certificates: `docker compose up` in this folder. Compose reads
 # this file automatically next to compose.yaml; deploy.mjs never copies it to the VM.
 # It uses fixed, not-secret dev values instead of config/*.env, keeps the databases in data/postgres here, and
 # publishes Hydra on localhost over plain http: http://localhost:4444 (public) and http://localhost:4445 (admin).
@@ -36,11 +36,10 @@ services:
     ports: !override
       - "4444:4444"
       - "4445:4445"
+    # No site here, so local health checks don't reach the VM's.
+    labels: !reset {}
 
-  nginx:
-    profiles: [vm]
-
-  certbot:
+  caddy:
     profiles: [vm]
 
   # The RAD portal runs from its own repo on a dev machine (`npm run dev` there).

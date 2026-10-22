@@ -1,47 +1,67 @@
-// Grafana Alloy (https://grafana.com/docs/alloy/): reads nginx's log from Docker and counts each request into
-// per-site metrics, which Prometheus collects from Alloy's own /metrics (port 12345), as:
-//   loki_process_custom_nginx_requests_total{site, status, method}
-//   loki_process_custom_nginx_request_seconds_bucket{site, ...}    total time, as nginx saw it
-//   loki_process_custom_nginx_upstream_seconds_bucket{site, ...}   time the app (Hydra, ...) took
-//   loki_process_custom_nginx_response_bytes_total{site, ...}
-// nginx/nginx.conf writes one JSON line per request. Lines that aren't JSON (nginx's own messages) are skipped.
+// Grafana Alloy (https://grafana.com/docs/alloy/): reads Caddy's log from Docker and counts each request into per-site
+// metrics, which Prometheus collects from Alloy's own /metrics (port 12345), as:
+//   loki_process_custom_site_requests_total{site, status, method}
+//   loki_process_custom_site_request_seconds_bucket{site, ...}    total time, as Caddy saw it
+//   loki_process_custom_site_upstream_seconds_bucket{site, ...}   time the app (Hydra, ...) took
+//   loki_process_custom_site_response_bytes_total{site, ...}
+// Each site logs one JSON line per request (the site snippet in caddy/Caddyfile), from a logger named
+// http.log.access.log<n>. Everything else Caddy logs is skipped, including requests for host names that aren't sites
+// (logged as http.log.access), which can be anything a client sends.
 // Sending the lines on to Loki later, for searching, is a forward_to in loki.process below.
 
-discovery.docker "nginx" {
+discovery.docker "caddy" {
   host = "unix:///var/run/docker.sock"
   filter {
     name   = "label"
-    values = ["com.docker.compose.service=nginx"]
+    values = ["com.docker.compose.service=caddy"]
   }
 }
 
-loki.source.docker "nginx" {
+loki.source.docker "caddy" {
   host       = "unix:///var/run/docker.sock"
-  targets    = discovery.docker.nginx.targets
-  forward_to = [loki.process.nginx.receiver]
+  targets    = discovery.docker.caddy.targets
+  forward_to = [loki.process.caddy.receiver]
 }
 
-loki.process "nginx" {
-  stage.drop {
-    expression          = "^[^{]"
+loki.process "caddy" {
+  stage.json {
+    expressions = {
+      logger        = "logger",
+      site          = "request.host",
+      status        = "status",
+      method        = "request.method",
+      request_time  = "duration",
+      upstream_ms   = "upstream_ms",
+      bytes         = "size",
+    }
+  }
+
+  // Only the sites' access logs.
+  stage.labels {
+    values = { logger = "" }
+  }
+  stage.match {
+    selector            = "{logger!~\"http\\\\.log\\\\.access\\\\.log[0-9]+\"}"
+    action              = "drop"
     drop_counter_reason = "not_a_request"
   }
 
-  stage.json {
-    expressions = {
-      site          = "site",
-      status        = "status",
-      method        = "method",
-      request_time  = "request_time",
-      upstream_time = "upstream_time",
-      bytes         = "bytes",
-    }
+  // The host name, without a port if the client gave one.
+  stage.template {
+    source   = "site"
+    template = "{{ regexReplaceAll \":[0-9]+$\" .Value \"\" }}"
   }
 
   // Only the methods a site normally gets, so odd ones from scanners don't each make new series.
   stage.template {
     source   = "method"
     template = "{{ if has .Value (list \"GET\" \"HEAD\" \"POST\" \"PUT\" \"PATCH\" \"DELETE\" \"OPTIONS\") }}{{ .Value }}{{ else }}other{{ end }}"
+  }
+
+  // Caddy gives the app's time in milliseconds; empty when nothing was proxied.
+  stage.template {
+    source   = "upstream_seconds"
+    template = "{{ with .upstream_ms }}{{ divf . 1000 }}{{ end }}"
   }
 
   stage.labels {
@@ -55,28 +75,28 @@ loki.process "nginx" {
 
   stage.metrics {
     metric.counter {
-      name              = "nginx_requests_total"
-      description       = "Requests nginx answered"
+      name              = "site_requests_total"
+      description       = "Requests Caddy answered"
       match_all         = true
       action            = "inc"
       max_idle_duration = "24h"
     }
     metric.histogram {
-      name              = "nginx_request_seconds"
-      description       = "Time to answer a request, as nginx saw it"
+      name              = "site_request_seconds"
+      description       = "Time to answer a request, as Caddy saw it"
       source            = "request_time"
       buckets           = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30]
       max_idle_duration = "24h"
     }
     metric.histogram {
-      name              = "nginx_upstream_seconds"
-      description       = "Time the app behind nginx took to answer"
-      source            = "upstream_time"
+      name              = "site_upstream_seconds"
+      description       = "Time the app behind Caddy took to answer"
+      source            = "upstream_seconds"
       buckets           = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30]
       max_idle_duration = "24h"
     }
     metric.counter {
-      name              = "nginx_response_bytes_total"
+      name              = "site_response_bytes_total"
       description       = "Bytes sent in response bodies"
       source            = "bytes"
       action            = "add"

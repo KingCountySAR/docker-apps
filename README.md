@@ -4,13 +4,17 @@ A consolidated/modular system to collect apps and core services for King County 
 
 ## Base Services
 
-- **Nginx and Certbot** allows many web apps to sit on the same machine with different hostnames with automated SSL certificates.
-  - Sites are files in `nginx/sites/`, one per host name.
-  - HTTPS only. Port 80 only answers Let's Encrypt and redirects to https. nginx terminates TLS and passes plain
-  http to Hydra (which is why Hydra's log warns that "HTTPS is disabled").
-  - Certificates take care of themselves. certbot gets each site's certificate once Let's Encrypt
-  can reach it here (trying staging first, so waiting for DNS doesn't use up the real limits), and renews it.
-  nginx loads each site once it has a certificate. When a site's file is removed, certbot deletes its certificate.
+- **Caddy** lets many web apps sit on the same machine under different host names, with automatic certificates.
+  - It's [caddy-docker-proxy](https://github.com/lucaslorentz/caddy-docker-proxy): Caddy, plus a plugin that makes
+  the sites from labels on the containers. A service with a site has `caddy` labels in `compose.yaml` (its host
+  names and where it listens) and a `kcsara.health` label (the path health checks ask for); `caddy/Caddyfile` has
+  what every site shares. Caddy watches Docker, so a labelled container from any compose project on the `kcsara`
+  network becomes a site, with nothing changed here.
+  - HTTPS only: port 80 redirects to https. Caddy terminates TLS and passes plain http to the apps (which is why
+  Hydra's log warns that "HTTPS is disabled").
+  - Certificates take care of themselves. Caddy gets each site's certificate from Let's Encrypt once its DNS points
+  here (trying Let's Encrypt's staging server while it can't, so waiting doesn't use up the real limits), and renews
+  it. They're in `data/caddy/`.
 - **Postgres** is shared by the apps (`data/postgres/`), on the compose network at `postgres:5432`, never published.
   - Each app has its own database and user, which only it can connect to. Its `<app>-db` service makes them from
     the app's connection URL before the app starts (see [Adding a database](#adding-a-database)).
@@ -19,8 +23,8 @@ A consolidated/modular system to collect apps and core services for King County 
   - `hydra-migrate` updates the database before Hydra starts, on every `docker compose up`.
   - Hydra's public API is on the internet, at https://jwt.kingcountysar.org: clients anywhere get tokens from
   `/oauth2/token` and check them with `/.well-known/jwks.json`.
-  - Its host name, which is also the issuer in its tokens, is `urls.self.issuer` in `hydra/hydra.yml`, with its site
-  in `nginx/sites/jwt.kingcountysar.org.conf`.
+  - Its host name, which is also the issuer in its tokens, is `urls.self.issuer` in `hydra/hydra.yml`, and its site
+  is the `caddy` labels on the `hydra` service.
   - The admin API is never public. Hydra's admin port (4445) has no authentication. It's only on the compose
   network (`http://hydra:4445`) and the VM's loopback address. `node hydra.mjs` reaches it over ssh.
   - Configuration is in `hydra/hydra.yml` (in git, no secrets). The secrets are only on the VM, in
@@ -45,7 +49,7 @@ A consolidated/modular system to collect apps and core services for King County 
 
 ## On a dev machine
 
-`docker compose up` in this folder runs Hydra and Postgres, without nginx or certificates, using
+`docker compose up` in this folder runs Hydra and Postgres, without Caddy or certificates, using
 `compose.override.yaml`: fixed dev secrets, `--dev` mode, issuer `http://localhost:4444/`, the admin API on
 http://localhost:4445, and placeholder login/consent URLs on `http://localhost:3999/...`, out of the way of other dev
 servers. Its database is in `data/` here (delete that folder to start over).
@@ -54,27 +58,26 @@ servers. Its database is in `data/` here (delete that folder to start over).
 opens psql there.
 
 `docker compose --profile monitoring up` adds monitoring, with Grafana on http://localhost:3030 (admin, password
-`dev-only`). Without nginx locally, the Sites dashboard stays empty, and on Docker Desktop cAdvisor sees only the
+`dev-only`). Without Caddy locally, the Sites dashboard stays empty, and on Docker Desktop cAdvisor sees only the
 whole machine, not each container.
 
 ## On the VM
 
 ```
 /srv/kcsara/
-  compose.yaml, hydra/, nginx/,  from this repo (node deploy.mjs vm); nginx/ includes certbot's script
+  compose.yaml, hydra/, caddy/,  from this repo (node deploy.mjs vm)
     postgres/, monitoring/, bin/
-  .env                           COMPOSE_PROFILES: which profiles run (full, unless changed)
+  .env                           COMPOSE_PROFILES: which profiles run (full, unless changed), and any <APP>_HOSTS
   apps/rad/                      the RAD portal's build, rad-portal.mjs (node deploy.mjs rad)
   apps/cedar/                    cedar's build, cedar.mjs (node deploy.mjs cedar)
   apps/reports/                  the reports' build, db-reporting.mjs (node deploy.mjs reports)
   apps/respond/                  Respond's build folder, current/ (and the one before, previous/) (node deploy.mjs respond)
-  config/                        settings and secrets: certbot.env, rad.env, cedar.env, reports.env and respond.env, and
+  config/                        settings and secrets: caddy.env, rad.env, cedar.env, reports.env and respond.env, and
                                  postgres.env, hydra.env, reports-db.env, respond-db.env, grafana.env and
                                  postgres-exporter.env (made by bin/secrets.sh)
   data/                          everything the services write
     postgres/                    the shared postgres: every app's database
-    letsencrypt/                 certificates
-    acme-challenge/              certbot's answers to Let's Encrypt's checks
+    caddy/                       certificates, and Caddy's Let's Encrypt account
     prometheus/                  metrics, kept a year (or 10 GB)
     grafana/                     Grafana's users, settings and alert state
 ```
@@ -90,54 +93,55 @@ whole machine, not each container.
 3. **Docker and folders.** `node deploy.mjs setup` (it asks for your sudo password on the VM).
 4. **Copy this folder's files over.** `node deploy.mjs vm`. It makes the secrets (`postgres.env`, `hydra.env`,
    `grafana.env`, `postgres-exporter.env`) with random values. This first time it stops after copying, and lists the configuration still missing.
-5. **Configuration**, on the VM: `cp /srv/kcsara/config/certbot.env.example /srv/kcsara/config/certbot.env` and set an
+5. **Configuration**, on the VM: `cp /srv/kcsara/config/caddy.env.example /srv/kcsara/config/caddy.env` and set an
    address for Let's Encrypt's expiry warnings.
 6. **Test name.** Until `jwt.kingcountysar.org` points here, you can run Hydra under a test name (see
    [Testing under another name](#testing-under-another-name)).
 7. **Start everything.** `node deploy.mjs vm` again, then `node deploy.mjs status`.
-8. **DNS.** Point Hydra's host name (or the test name) at the VM's public IP. Within about 10 minutes certbot gets its certificate and
-   nginx loads it: watch with `node deploy.mjs logs certbot` (`docker compose restart certbot` on the VM tries again
-   right away). Until its DNS is ready, it just waits.
+8. **DNS.** Point Hydra's host name (or the test name) at the VM's public IP. Caddy gets its certificate within
+   minutes: watch with `node deploy.mjs logs caddy`. Until its DNS is ready, it keeps trying, less and less often
+   (`docker compose restart caddy` on the VM tries again right away).
 9. **Check it.** `https://<host>/.well-known/openid-configuration` shows the issuer and endpoints. To try a token,
    make a client with `node hydra.mjs create oauth2-client ...` (below), then
    `curl -u <client id>:<client secret> -d grant_type=client_credentials -d scope=<scope> https://<host>/oauth2/token`.
 10. **Back up `config/`** somewhere safe (a password manager). Without `SECRETS_SYSTEM`, the database's
     client secrets and signing keys can't be read.
 
+## Moving from nginx to Caddy (once)
+
+A VM set up before Caddy has nginx and certbot. To move it over:
+
+1. On the VM: `cd /srv/kcsara && sed s/CERTBOT_EMAIL/ACME_EMAIL/ config/certbot.env > config/caddy.env`.
+2. Any test names in the old `nginx/sites/` become `<APP>_HOSTS` in `/srv/kcsara/.env` (see
+   [Testing under another name](#testing-under-another-name)). Respond's, above all: add
+   `RESPOND_HOSTS=respond-next.kcesar.org, rn-4x4.kcesar.org, rn-esar.kcesar.org`, or its sites disappear.
+3. `node deploy.mjs vm`. It removes nginx and certbot and starts Caddy, which gets a new certificate for each site:
+   each is unreachable until its certificate arrives, usually within a minute. Watch with `node deploy.mjs logs caddy`.
+4. Once the Health dashboard shows every site up, remove what's left of nginx and certbot on the VM:
+   `sudo rm -rf nginx data/letsencrypt data/acme-challenge config/certbot.env config/certbot.env.example`.
+
 ## Testing under another name
 
-Test names stay out of git, as uncommitted changes in your working files (which is what `node deploy.mjs vm` sends):
+A site's host names are its service's `caddy` label, which takes them from `<APP>_HOSTS` in `/srv/kcsara/.env` on
+the VM when that's set (`HYDRA_HOSTS`, `RAD_HOSTS`, `CEDAR_HOSTS`, `REPORTS_HOSTS`, `RESPOND_HOSTS`), so a test name never needs a change here:
 
-1. Copy the site's file (like `nginx/sites/jwt.kingcountysar.org.conf`) to `nginx/sites/<test name>.conf` and change
-   the three names in it.
-   Add that file to `.git/info/exclude`, which keeps it out of git without naming it in `.gitignore`.
-2. For Hydra only: change `urls.self.issuer` in `hydra/hydra.yml` to `https://<test name>/`. Don't commit that change.
-3. Point the test name's DNS at the VM, then `node deploy.mjs vm`.
+1. On the VM, add the test name to `/srv/kcsara/.env`, with the real one if it should keep working too:
+   `RAD_HOSTS=rad.kingcountysar.org, kcsara-rad.kcesar.org`.
+2. For Hydra only: set its issuer to the test name too, as `URLS_SELF_ISSUER=https://<test name>/` in
+   `/srv/kcsara/config/hydra.env` (it overrides `hydra/hydra.yml`).
+3. Point the test name's DNS at the VM, then `docker compose up -d` in `/srv/kcsara` (or `node deploy.mjs vm`).
 
-Hydra has one issuer at a time, and clients check it, so tokens from one name aren't accepted for another. Both sites
-can be there at once, so the real name's certificate can be ready before switching.
+Hydra has one issuer at a time, and clients check it, so tokens from one name aren't accepted for another.
 
-**Switching the RAD portal to rad.kingcountysar.org**, once its DNS points here: delete the test site's file, run
-`node deploy.mjs vm`, and remove the test name from the Google client's origins and from DNS.
-
-**Switching cedar to cedar.kingcountysar.org** is the same: delete the test site's file, run `node deploy.mjs vm`,
-and remove the test name's DNS record. Its clients change to the new address.
-
-**Switching to jwt.kingcountysar.org**, once its DNS points here:
-
-1. Undo the change to `hydra/hydra.yml` (`git checkout hydra/hydra.yml`), delete the test site's file, and run
-   `node deploy.mjs vm`. certbot deletes the test name's certificate within 10 minutes.
-2. Change the apps using it to `https://jwt.kingcountysar.org/` (token URL and issuer). Their tokens from the test
-   name stop being accepted, so they get new ones.
-3. Change `JWT_ISSUER` in `config/cedar.env` on the VM to `https://jwt.kingcountysar.org/`, then
-   `docker compose up -d cedar` there.
-4. Remove the test name's DNS record.
+To switch to the real name once its DNS points here, take the test name (and `URLS_SELF_ISSUER`) out again and run
+`docker compose up -d`. For Hydra, change the apps using it to the real issuer, including `JWT_ISSUER` in
+`config/cedar.env`; their tokens from the test name stop being accepted, so they get new ones.
 
 ## RAD portal
 
 The `rad` service runs `apps/rad/rad-portal.mjs` on the VM, the whole app in one file from `npm run build` in the
-rad-portal repo. nginx passes its sites (`nginx/rad.inc`) to it at `http://rad:3000`. Until the first build arrives,
-it waits.
+rad-portal repo. Caddy passes its site (its `caddy` labels) to it at `http://rad:3000`. Until the first build
+arrives, it waits.
 
 Setting it up:
 
@@ -148,27 +152,24 @@ Setting it up:
    Authorized JavaScript origins.
 4. **The app**: `npm run build` in rad-portal, then `node deploy.mjs rad` here. It copies
    `../rad-portal/server/dist/rad-portal.mjs` (and its `.map`), or the path you give, and restarts the app.
-5. Point the site's DNS at the VM, and run `node deploy.mjs vm` (see [Testing under another name](#testing-under-another-name)
-   for kcsara-rad.kcesar.org).
+5. Point the site's DNS at the VM, and run `node deploy.mjs vm`.
 
 Health checks ask for its `/health`.
 
 ## cedar
 
-The `cedar` service runs `apps/cedar/cedar.mjs` on the VM, built by `npm run build` in the cedar repo. nginx passes
-its sites (`nginx/cedar.inc`) to it at `http://cedar:3040`. Until the first build arrives, it waits. Its routes,
+The `cedar` service runs `apps/cedar/cedar.mjs` on the VM, built by `npm run build` in the cedar repo. Caddy passes
+its site (its `caddy` labels) to it at `http://cedar:3040`. Until the first build arrives, it waits. Its routes,
 scopes and settings are in cedar's README.
 
 Setting it up:
 
 1. **Configuration**, on the VM: `cp /srv/kcsara/config/cedar.env.example /srv/kcsara/config/cedar.env` and fill it
-   in: the D4H token and team, and `JWT_ISSUER`, which must be Hydra's issuer exactly as in `hydra/hydra.yml`
-   (`https://kcsara-jwt.kcesar.org/` while Hydra runs under that test name). `node deploy.mjs vm` stops until this
-   file exists.
+   in: the D4H token and team, and `JWT_ISSUER`, which must be Hydra's issuer exactly as in `hydra/hydra.yml`.
+   `node deploy.mjs vm` stops until this file exists.
 2. **The app**: `npm run build` in cedar, then `node deploy.mjs cedar` here. It copies `../cedar/dist/cedar.mjs` (and
    its `.map`), or the path you give, and restarts the app.
-3. Point the site's DNS at the VM, and run `node deploy.mjs vm` (see [Testing under another name](#testing-under-another-name)
-   for kcsara-cedar.kcesar.org).
+3. Point the site's DNS at the VM, and run `node deploy.mjs vm`.
 4. **Clients**: make each one in Hydra with the scopes it needs, like
    `node hydra.mjs create oauth2-client --name "<app>" --grant-type client_credentials --scope d4h:members.read --format json`.
 
@@ -180,7 +181,7 @@ Health checks ask for its `/health`.
 ## KCSARA Reports
 
 The `reports` service runs `apps/reports/db-reporting.mjs` on the VM, built by `npm run build` in the db-reporting
-repo. nginx passes its site (`nginx/reports.inc`) to it at `http://reports:3000`. Its data is in the shared postgres,
+repo. Caddy passes its site (its `caddy` labels) to it at `http://reports:3000`. Its data is in the shared postgres,
 in the `reporting` database (user `reporting`), which `reports-db` makes from `config/reports-db.env`. `reports-etl`
 runs the same file as `node db-reporting.mjs etl` every night at 10:00 UTC, loading D4H through cedar. Until the first
 build arrives, both wait.
@@ -210,11 +211,12 @@ other apps it's a folder: `apps/respond/current/` holds `index.mjs` (the server)
 `apps/respond/previous/`, and restarts it. Its data is in the shared postgres, in the `respond` database (user
 `respond`), which `respond-db` makes from `config/respond-db.env`. Until the first build arrives, it waits.
 
-nginx passes its sites (`nginx/respond.inc`) to it at `http://respond:4000`, with `/api/sync`, the app's live
+Caddy passes its sites (its `caddy` labels) to it at `http://respond:4000`, with `/api/sync`, the app's live
 connection, as a WebSocket. Every organization in Respond has its own site, told apart by host name, so each host
-name is in two places: in the app (the organization's host names, from the seed file or the app's admin page) and as
-a file in `nginx/sites/` here. A name in only one of them doesn't work: without a file here it has no certificate,
-and a name the app doesn't know answers "No site is set up".
+name is in two places: in the app (the organization's host names, from the seed file or the app's admin page) and in
+`RESPOND_HOSTS` in `/srv/kcsara/.env` on the VM (comma separated; `respond.kingcountysar.org` when it isn't set).
+A name in only one of them doesn't work: without it in `RESPOND_HOSTS` it has no certificate, and a name the app
+doesn't know answers "No site is set up".
 
 Setting it up:
 
@@ -235,27 +237,27 @@ Setting it up:
    secrets). It goes over ssh straight into `seed.mjs`, never onto the VM's disk; each provider and organization in it
    replaces the stored one with its id, and nothing else changes, so it's safe to run again. It restarts the app.
    See respond-sync's README for the file's shape. Each organization's `hostnames` must name its sites here.
-6. **Sites**: a file in `nginx/sites/` for each host name (copy `respond-next.kcesar.org.conf` and change the three
-   names), its DNS pointed at the VM, then `node deploy.mjs vm`.
+6. **Sites**: each host name in `RESPOND_HOSTS` in `/srv/kcsara/.env` on the VM, its DNS pointed at the VM, then
+   `node deploy.mjs vm`.
 7. **respond-next's data** (once, at cut-over): `node deploy.mjs import-respond <folder> --dry-run`, then without
    `--dry-run`, with a folder from `mongoexport --jsonArray` of respond-next's `activities` and `locations`. Only those
-   two files go over ssh, into a one-off container that unpacks and imports them (`import-legacy.mjs`), so they never
+   two files go over ssh, into the running app's container, which unpacks them to a temporary folder, imports them (`import-legacy.mjs`) and removes them, so they never
    land on the VM's disk. Activities and saved locations already there are skipped, so it's safe to run again; it
    restarts the app. The organizations need their `legacyId` from the seed first (see "Importing from respond-next"
    in respond-sync's README).
 
-For now Respond runs under the test name respond-next.kcesar.org, whose site file is kept out of git (see
-[Testing under another name](#testing-under-another-name)). **Moving to respond.kingcountysar.org** (and each
-organization's own names): add each one's site file here (committed), its DNS and its Google redirect URI, add it to
-its organization's host names in Respond, and `node deploy.mjs vm`. Then remove the test name the same way: from the
-organization, its site file here, Google and DNS.
+For now Respond runs under test names: `RESPOND_HOSTS=respond-next.kcesar.org, rn-4x4.kcesar.org, rn-esar.kcesar.org`.
+**Moving to respond.kingcountysar.org** (and each organization's own names): add each one to `RESPOND_HOSTS`, its
+DNS and its Google redirect URI, add it to its organization's host names in Respond, and `node deploy.mjs vm`. Then
+remove the test name the same way: from the organization, `RESPOND_HOSTS`, Google and DNS. Once the names are
+settled, they can be the default in `compose.yaml` instead.
 
 Health checks ask for its `/health`.
 
 ## Removing a site
 
-Delete its file from `nginx/sites/`, run `node deploy.mjs vm`, and remove its DNS record. certbot deletes its
-certificate within 10 minutes (putting the file back gets a new one).
+Take its service's `caddy` labels out (or the service), run `node deploy.mjs vm`, and remove its DNS record. Caddy
+stops serving it at once; its certificate is left to expire.
 
 ## Running Hydra commands
 
@@ -295,7 +297,7 @@ errors until its configuration has the new one. To change it without a gap, make
 Use PowerShell 7 (`pwsh`) for step 1: Windows PowerShell 5's `>` writes UTF-16, which Hydra can't read back.
 
 Apps on the VM in another compose project can join the `kcsara` network (see `compose.yaml`) and call Hydra at
-`http://hydra:4444` (public) and `http://hydra:4445` (admin), without going through nginx.
+`http://hydra:4444` (public) and `http://hydra:4445` (admin), without going through Caddy.
 
 ## Adding a database
 
@@ -318,16 +320,16 @@ Prometheus collects, every 30 seconds:
 
 | From | What |
 |---|---|
-| `alloy` | Each site's requests, status codes, response times and bytes, counted from nginx's log (`monitoring/alloy/config.alloy`; nginx logs each request as JSON, `nginx/nginx.conf`) |
+| `alloy` | Each site's requests, status codes, response times and bytes, counted from Caddy's log (`monitoring/alloy/config.alloy`; each site logs each request as JSON, `caddy/Caddyfile`) |
 | `node-exporter` | The VM's CPU, memory, disk I/O and filesystems (not its network: see cadvisor) |
 | `cadvisor` | Each service's CPU, memory, disk and network |
 | `postgres-exporter` | Postgres's connections, database sizes and activity, as a read-only `postgres_exporter` user |
 | `hydra` | Hydra's own request counts and times, per endpoint |
-| `blackbox-exporter` | Health checks: each site in `nginx/sites/` over https from the VM (DNS, certificate and its expiry, an answer that isn't a server error), and Hydra's `/health/ready` |
+| `blackbox-exporter` | Health checks: each site over https from the VM (DNS, certificate and its expiry, an answer that isn't a server error), and Hydra's `/health/ready` |
 
-A new site in `nginx/sites/` is checked and graphed without any other change: `bin/site-targets.sh` lists them for
-Prometheus on each deploy. Each is checked at `/`, unless its file names a better address on a line of its own, like
-Hydra's sites do: `# health: /health/ready`.
+A new site is checked and graphed without any other change: the `site-targets` service (`bin/site-targets.sh`)
+lists, every minute, each host name in a container's `caddy` label at the path in its `kcsara.health` label (like
+`/health/ready` for Hydra). A container without `kcsara.health` isn't checked.
 
 **Grafana** is only on the VM's own loopback address. `node grafana.mjs` opens it at http://localhost:3030 through an
 ssh tunnel, until Ctrl+C. Sign in as `admin`, with `GF_SECURITY_ADMIN_PASSWORD` from `config/grafana.env` on the VM.
@@ -365,12 +367,12 @@ points, and make it the default policy's in Notification policies. Email needs G
 3. People signing in for the first time are Viewers; make admins in Grafana → Administration → Users.
 
 When Grafana gets a public site, add `https://<its host>/login/google` to the client's redirect URIs, set
-`root_url` in `monitoring/grafana/grafana.ini` to its address, and add its site to `nginx/sites/` (proxying to
-`http://grafana:3000`).
+`root_url` in `monitoring/grafana/grafana.ini` to its address, and give the `grafana` service `caddy` labels
+(proxying to `grafana:3000`).
 
 ### Choosing what runs
 
-The core (postgres, hydra, nginx, certbot) always runs. Everything else is in profiles: each part in `full` and in its
+The core (postgres, hydra, caddy) always runs. Everything else is in profiles: each part in `full` and in its
 own (`monitoring`, `rad`, `cedar`, `reports`, `respond`, and each app added later). Profiles only add services, so to leave one part out, list the others
 rather than using `full`.
 
@@ -391,7 +393,7 @@ A new optional part gets `profiles: [full, <its name>]` on each of its services.
 
 | To | Run |
 |---|---|
-| Change hydra.yml, nginx/, monitoring/ or compose.yaml | edit here, then `node deploy.mjs vm` (it restarts each service whose own configuration changed) |
+| Change hydra.yml, caddy/, monitoring/ or compose.yaml | edit here, then `node deploy.mjs vm` (it restarts each service whose own configuration changed) |
 | Deploy a new RAD portal build | `npm run build` in rad-portal, then `node deploy.mjs rad` |
 | Deploy a new cedar build | `npm run build` in cedar, then `node deploy.mjs cedar` |
 | Deploy a new reports build | `npm run build` in db-reporting, then `node deploy.mjs reports` |
@@ -400,11 +402,11 @@ A new optional part gets `profiles: [full, <its name>]` on each of its services.
 | Import respond-next's activities into Respond | `node deploy.mjs import-respond <folder> [--dry-run]` (see [Respond](#respond)) |
 | Open Grafana | `node grafana.mjs`, then http://localhost:3030 |
 | See what's running | `node deploy.mjs status` |
-| See a service's log | `node deploy.mjs logs hydra` (or `rad`, `cedar`, `reports`, `reports-etl`, `respond`, `postgres`, `nginx`, `certbot`, `grafana`, ...); `logs -f hydra` keeps watching |
+| See a service's log | `node deploy.mjs logs hydra` (or `rad`, `cedar`, `reports`, `reports-etl`, `respond`, `postgres`, `caddy`, `grafana`, ...); `logs -f hydra` keeps watching |
 | Upgrade Hydra | change the image tag in `compose.yaml` (read Ory's upgrade notes first), back up the database, `node deploy.mjs vm` |
 | Back up a database | on the VM: `docker compose exec -T postgres pg_dump -U postgres <database> \| gzip > <database>-$(date +%F).sql.gz` (or `pg_dumpall` for all of them) |
 | Open psql as the superuser | `node db.mjs <database>` (like `node db.mjs hydra`; no database for `postgres`). Add psql options after it, like `-c "<sql>"`, or `< file.sql` to run a file |
-| See certificates | on the VM: `docker compose exec certbot certbot certificates` |
+| See certificates | on the VM: `sudo ls data/caddy/caddy/certificates/*/` |
 
 ## Rotating Hydra's secret
 

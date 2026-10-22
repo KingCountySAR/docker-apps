@@ -26,6 +26,7 @@ services:
     volumes:
       - ./monitoring/prometheus:/etc/prometheus:ro
       - ./data/prometheus:/prometheus
+      - site-targets:/etc/prometheus/targets:ro
     depends_on:
       monitoring-data: { condition: service_completed_successfully }
     restart: unless-stopped
@@ -48,7 +49,20 @@ services:
       prometheus: { condition: service_started }
     restart: unless-stopped
 
-  # Reads nginx's log from Docker and counts requests per site (see monitoring/alloy/config.alloy). Docker's socket
+  # Lists the sites for Prometheus's health checks, from the caddy and kcsara.health labels on Docker's containers
+  # (see bin/site-targets.sh). Docker's socket is mounted read-only, but anything with it can use all of Docker's API.
+  site-targets:
+    profiles: [full, monitoring]
+    image: docker:29.8.2-cli
+    volumes:
+      - ./bin:/scripts:ro
+      - site-targets:/targets
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ["sh", "/scripts/site-targets.sh"]
+    restart: unless-stopped
+    init: true
+
+  # Reads Caddy's log from Docker and counts requests per site (see monitoring/alloy/config.alloy). Docker's socket
   # lets it read containers' logs; it's mounted read-only, but anything with the socket can use all of Docker's API.
   alloy:
     profiles: [full, monitoring]
@@ -130,3 +144,5 @@ services:
 
 volumes:
   alloy-data:
+  # sites.json, written by site-targets and read by Prometheus
+  site-targets:

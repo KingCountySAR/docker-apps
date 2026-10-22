@@ -8,7 +8,7 @@ import { ROOT, SSH_USAGE, fail, here, onVm, parseArgs, quote, sendFile } from '.
 const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-options "<options>"]
 
   setup                 Install Docker and create ${ROOT} on a fresh VM (asks for your sudo password)
-  vm                    Copy compose.yaml, hydra/, nginx/, postgres/, monitoring/, bin/ and the config examples, make
+  vm                    Copy compose.yaml, hydra/, caddy/, postgres/, monitoring/, bin/ and the config examples, make
                         any missing secrets, and apply them
   rad [bundle]          Copy the RAD portal's build (../rad-portal/server/dist/rad-portal.mjs, unless given) to
                         ${ROOT}/apps/rad, and restart it
@@ -23,20 +23,21 @@ const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-opti
                         *.activities.json and *.locations.json) into Respond's database, skipping those already there,
                         and restart it. Seed the organizations, with their legacyId, first. With --dry-run, only say
                         what it would import. The files stay off the VM's disk, as with seed-respond
-  status               What's running
-  logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, nginx, grafana, ...), or all of them;
+  status                What's running
+  logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, caddy, grafana, ...), or all of them;
                         with -f (--follow), then what's logged after, until Ctrl+C
 
 ${SSH_USAGE}
 
 Example: node deploy.mjs status --host me@vm.example.org --ssh-options "-i ~/.ssh/vm_key"`;
 
-const FOLDERS = ['hydra', 'nginx', 'postgres', 'monitoring', 'bin'];
+const FOLDERS = ['hydra', 'caddy', 'postgres', 'monitoring', 'bin'];
 
 // Configuration a service reads only when it starts, which compose doesn't watch: the service restarts when any of it
 // changed since the last deploy (when the service is running).
 const RESTART_ON_CHANGE = {
   hydra: ['hydra/hydra.yml'],
+  caddy: ['caddy'],
   prometheus: ['monitoring/prometheus/prometheus.yml'],
   grafana: ['monitoring/grafana'],
   alloy: ['monitoring/alloy'],
@@ -69,8 +70,6 @@ async function deployVm() {
     'rm -rf .incoming',
     // Secrets nobody needs to choose (postgres.env, hydra.env, ...); files that exist are left alone.
     'sh bin/secrets.sh',
-    // The sites for Prometheus's health checks
-    'sh bin/site-targets.sh',
     // Everything runs unless .env says otherwise (see "Choosing what runs" in the README).
     'grep -qs "^COMPOSE_PROFILES=" .env || echo COMPOSE_PROFILES=full >> .env',
     // docker compose won't run while an env file it names is missing, as on a new VM: say which, and stop here.
@@ -79,10 +78,6 @@ async function deployVm() {
     // Recreates whatever compose.yaml changed, then restarts services whose own configuration did.
     'docker compose up -d --remove-orphans',
     ...restartsOnChange(),
-    // Loads new or changed sites now rather than within the minute; a site without a certificate yet waits for one.
-    'docker compose exec -T nginx sh /etc/kcsara-nginx/run.sh check',
-    // A new site gets its certificate on certbot's next try; restarting it tries now.
-    'docker compose restart certbot',
     'docker compose ps',
   ], { files: ['compose.yaml', ...FOLDERS, ...examples], cwd: here });
 }
@@ -158,11 +153,13 @@ async function seedRespond(file) {
   await onVm([
     `cd ${ROOT}`,
     `{ [ -f apps/respond/current/seed.mjs ] || { echo 'No Respond build on the VM yet: run node deploy.mjs respond first.'; exit 1; }; }`,
+    `{ [ -n "$(docker compose ps -q respond 2> /dev/null)" ] || { echo 'Respond is not running: start it with node deploy.mjs vm first.'; exit 1; }; }`,
     // The file arrives in a tar on standard input, and goes from it straight to the import (seed.mjs reads - as
-    // standard input), in a one-off container with the app's database and SECRETS_KEY.
-    'tar -xzO | docker compose run --rm -T respond node --enable-source-maps current/seed.mjs -',
+    // standard input), run in the app's container, with its database and SECRETS_KEY. Not in a one-off container
+    // (`docker compose run`): that would carry the service's caddy labels, making Respond's sites twice for Caddy.
+    'tar -xzO | docker compose exec -T respond node --enable-source-maps current/seed.mjs -',
     // The app reads the organizations when it starts.
-    '{ [ -z "$(docker compose ps -q respond 2> /dev/null)" ] || docker compose restart respond; }',
+    'docker compose restart respond',
   ], { files: [path.basename(file)], cwd: path.dirname(file) });
 }
 
@@ -176,15 +173,16 @@ async function importRespond(folder, dryRun) {
     return names.length === 1 ? names[0] : fail(`${folder}: expected one *${suffix}, found ${names.length ? names.join(', ') : 'none'}`);
   });
   console.log(`Importing ${files.join(' and ')} into Respond's database${dryRun ? ' (dry run)' : ''}`);
-  const run = `mkdir /tmp/export && tar -xz -C /tmp/export && node --enable-source-maps current/import-legacy.mjs /tmp/export${dryRun ? ' --dry-run' : ''}`;
+  const run = `dir=$(mktemp -d) && tar -xz -C "$dir" && node --enable-source-maps current/import-legacy.mjs "$dir"${dryRun ? ' --dry-run' : ''}; status=$?; rm -rf "$dir"; exit $status`;
   await onVm([
     `cd ${ROOT}`,
     `{ [ -f apps/respond/current/import-legacy.mjs ] || { echo 'No import-legacy.mjs in the Respond build on the VM: run node deploy.mjs respond first.'; exit 1; }; }`,
-    // The tar goes on standard input to a one-off container (with the app's database and SECRETS_KEY), which unpacks
-    // it inside itself, where it's removed with the container.
-    `docker compose run --rm -T respond sh -c ${quote(run)}`,
+    `{ [ -n "$(docker compose ps -q respond 2> /dev/null)" ] || { echo 'Respond is not running: start it with node deploy.mjs vm first.'; exit 1; }; }`,
+    // The tar goes on standard input to the app's container (with its database and SECRETS_KEY; not a one-off
+    // container, as in seedRespond), which unpacks it into a temporary folder inside itself and removes it after.
+    `docker compose exec -T respond sh -c ${quote(run)}`,
     // The app adds imported activities to its list and archive when it starts.
-    ...(dryRun ? [] : ['{ [ -z "$(docker compose ps -q respond 2> /dev/null)" ] || docker compose restart respond; }']),
+    ...(dryRun ? [] : ['docker compose restart respond']),
   ], { files, cwd: folder });
 }
 

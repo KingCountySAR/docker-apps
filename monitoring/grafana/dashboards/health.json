@@ -34,7 +34,7 @@
     {
       "type": "table",
       "title": "Sites",
-      "description": "Each site in nginx/sites/, checked from this VM over https, and how long until its certificate expires. A site whose DNS isn't ready yet shows down.",
+      "description": "Each site (a container with caddy labels), checked from this VM over https, and how long until its certificate expires. A site whose DNS isn't ready yet shows down.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -222,7 +222,7 @@
     {
       "type": "table",
       "title": "Services",
-      "description": "Each service's own health check, straight to it inside the VM rather than through nginx (see the services job in monitoring/prometheus/prometheus.yml).",
+      "description": "Each service's own health check, straight to it inside the VM rather than through Caddy (see the services job in monitoring/prometheus/prometheus.yml).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

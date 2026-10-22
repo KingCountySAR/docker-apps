@@ -5,5 +5,3 @@ data/
 # Your own deploy settings (see .env.example)
 .env
 
-# Written on the VM by bin/site-targets.sh
-monitoring/prometheus/sites.json

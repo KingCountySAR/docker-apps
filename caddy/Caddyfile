@@ -1,0 +1,33 @@
+# Caddy's base configuration. The sites themselves come from labels on each app's container, read through Docker by
+# caddy-docker-proxy and added to this; an app with a site has, in compose.yaml:
+#
+#   labels:
+#     caddy: rad.kingcountysar.org          its host names, comma separated
+#     caddy.import: site                    the snippet below
+#     caddy.reverse_proxy: rad:3000         where it listens, on the kcsara network
+#     kcsara.health: /health                the path health checks ask for (see bin/site-targets.sh)
+#
+# Caddy gets each site's certificate from Let's Encrypt once its DNS points here (trying Let's Encrypt's staging
+# server while it can't, so waiting doesn't use up the real limits), renews it, and sends http to https.{
+	# For Let's Encrypt's expiry warnings: ACME_EMAIL in config/caddy.env.
+	email {$ACME_EMAIL}
+}
+
+# What every site has: HSTS, and each request logged as one line of JSON, which Alloy (monitoring/alloy/config.alloy)
+# counts into per-site metrics. Request and response headers are left out (Caddy hides cookies and Authorization in
+# them anyway); upstream_ms is how long the app took.
+(site) {
+	header Strict-Transport-Security "max-age=31536000"
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				request>tls delete
+				resp_headers delete
+			}
+		}
+	}
+	log_append upstream_ms {http.reverse_proxy.upstream.duration_ms}
+}

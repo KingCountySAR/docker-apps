@@ -3,13 +3,16 @@
 #   config/*.env            environment for each service. bin/secrets.sh makes postgres.env and hydra.env; the
 #                           others start from config/*.env.example
 #   data/postgres/          the shared postgres: a database (and user) for each app
-#   data/letsencrypt/       Let's Encrypt certificates, got and renewed by the certbot service
-#   data/acme-challenge/    certbot's answers to Let's Encrypt's checks, served by nginx on port 80
-# Only nginx is reachable from outside, on ports 80 and 443. Hydra's admin API (4445) has no authentication of its
-# own: it's only on this network and the VM's loopback address, never through nginx.
+#   data/caddy/             Caddy's certificates (from Let's Encrypt) and ACME account
+# Only Caddy is reachable from outside, on ports 80 and 443. Hydra's admin API (4445) has no authentication of its
+# own: it's only on this network and the VM's loopback address, never through Caddy.
+#
+# A service with a site has caddy labels (see caddy/Caddyfile): its host names, and where Caddy passes requests. Each
+# host name list can be changed without changing this file, as <APP>_HOSTS in .env next to it (see "Testing under
+# another name" in the README).
 name: kcsara
 
-# Profiles choose what runs besides the core here (postgres, hydra, nginx, certbot), which always does. Each optional
+# Profiles choose what runs besides the core here (postgres, hydra, caddy), which always does. Each optional
 # part is in `full` and in its own profile (`monitoring`, ...). On the VM, COMPOSE_PROFILES in .env picks them for every
 # docker compose command there: `full` unless changed (see "Choosing what runs" in the README).
 
@@ -70,6 +73,12 @@ services:
     # The admin API, only on the VM's own loopback address (for `node hydra.mjs` and anything else run on the VM).
     ports:
       - "127.0.0.1:4445:4445"
+    # Only the public API (4444) is a site.
+    labels:
+      caddy: ${HYDRA_HOSTS:-jwt.kingcountysar.org}
+      caddy.import: site
+      caddy.reverse_proxy: hydra:4444
+      kcsara.health: /health/ready
     depends_on:
       hydra-migrate: { condition: service_completed_successfully }
     restart: unless-stopped
@@ -95,6 +104,11 @@ services:
     user: node
     # Waits for the first `node deploy.mjs rad`, rather than failing over and over without its file.
     command: ["sh", "-c", "until [ -f rad-portal.mjs ]; do sleep 10; done; exec node --enable-source-maps rad-portal.mjs"]
+    labels:
+      caddy: ${RAD_HOSTS:-rad.kingcountysar.org}
+      caddy.import: site
+      caddy.reverse_proxy: rad:3000
+      kcsara.health: /health
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
       interval: 30s
@@ -113,7 +127,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3040
-      # Hydra's keys, straight from Hydra on this network rather than through the internet and nginx. Tokens must still
+      # Hydra's keys, straight from Hydra on this network rather than through the internet and Caddy. Tokens must still
       # name JWT_ISSUER (in config/cedar.env).
       JWT_URL: http://hydra:4444/
     volumes:
@@ -122,6 +136,11 @@ services:
     user: node
     # Waits for the first `node deploy.mjs cedar`, rather than failing over and over without its file.
     command: ["sh", "-c", "until [ -f cedar.mjs ]; do sleep 10; done; exec node --enable-source-maps cedar.mjs"]
+    labels:
+      caddy: ${CEDAR_HOSTS:-cedar.kingcountysar.org}
+      caddy.import: site
+      caddy.reverse_proxy: cedar:3040
+      kcsara.health: /health
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3040/health"]
       interval: 30s
@@ -166,6 +185,11 @@ services:
     user: node
     # Waits for the first `node deploy.mjs reports`, rather than failing over and over without its file.
     command: ["sh", "-c", "until [ -f db-reporting.mjs ]; do sleep 10; done; exec node --enable-source-maps db-reporting.mjs"]
+    labels:
+      caddy: ${REPORTS_HOSTS:-reports.kingcountysar.org}
+      caddy.import: site
+      caddy.reverse_proxy: reports:3000
+      kcsara.health: /health
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
       interval: 30s
@@ -218,8 +242,8 @@ services:
 
   # Respond (profiles full and respond): the respond-sync (Mission Sync) repo's build, a folder rather than one file:
   # apps/respond/current/ holds index.mjs (the server), public/ (the UI it serves), seed.mjs and import-legacy.mjs, copied there by
-  # `node deploy.mjs respond`. Each organization's site is a host name in nginx/sites/ (see nginx/respond.inc); the
-  # app tells them apart by host name. Its data, and the organizations, are in the shared postgres (respond database).
+  # `node deploy.mjs respond`. Each organization's site is a host name in its caddy label (RESPOND_HOSTS in .env); the
+  # app tells them apart by host name, and its live sync (/api/sync) is a WebSocket, which Caddy passes on as it is. Its data, and the organizations, are in the shared postgres (respond database).
   respond:
     image: node:22-alpine
     profiles: [full, respond]
@@ -234,6 +258,11 @@ services:
     user: node
     # Waits for the first `node deploy.mjs respond`, rather than failing over and over without its files.
     command: ["sh", "-c", "until [ -f current/index.mjs ]; do sleep 10; done; cd current && exec node --enable-source-maps index.mjs"]
+    labels:
+      caddy: ${RESPOND_HOSTS:-respond.kingcountysar.org}
+      caddy.import: site
+      caddy.reverse_proxy: respond:4000
+      kcsara.health: /health
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4000/health"]
       interval: 30s
@@ -244,35 +273,29 @@ services:
     restart: unless-stopped
     init: true
 
-  nginx:
-    image: nginx:stable-alpine
+  # The way in from outside, on ports 80 and 443 (and 443 over UDP, for HTTP/3): caddy-docker-proxy, Caddy built
+  # with a plugin that makes each site from the labels on the containers (see caddy/Caddyfile). It watches Docker, so a
+  # container that starts or stops with caddy labels changes the sites within seconds, from any compose project on the
+  # kcsara network. Docker's socket is mounted read-only, but anything with it can use all of Docker's API.
+  caddy:
+    image: lucaslorentz/caddy-docker-proxy:2.13.1-alpine
+    # ACME_EMAIL, for Let's Encrypt's expiry warnings
+    env_file: ./config/caddy.env
+    environment:
+      CADDY_DOCKER_CADDYFILE_PATH: /etc/kcsara-caddy/Caddyfile
     ports:
       - "80:80"
       - "443:443"
+      - "443:443/udp"
     volumes:
-      - ./nginx:/etc/kcsara-nginx:ro
-      - ./data/letsencrypt:/etc/letsencrypt:ro
-      - ./data/acme-challenge:/var/www/certbot:ro
-    # Loads the sites in nginx/sites/ that have certificates, and reloads when certificates or configuration change.
-    command: ["sh", "/etc/kcsara-nginx/run.sh"]
+      - ./caddy:/etc/kcsara-caddy:ro
+      - ./data/caddy:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
-    init: true
-
-  certbot:
-    image: certbot/certbot
-    env_file: ./config/certbot.env
-    volumes:
-      - ./data/letsencrypt:/etc/letsencrypt
-      - ./data/acme-challenge:/var/www/certbot
-      - ./nginx:/etc/kcsara-nginx:ro
-    # Gets certificates for the sites in nginx/sites/ and renews them; see nginx/certbot.sh.
-    entrypoint: ["sh", "/etc/kcsara-nginx/certbot.sh"]
-    depends_on: [nginx]
-    restart: unless-stopped
-    init: true
 
 networks:
   # A fixed name, so other compose projects on the VM can join with `networks: { default: { name: kcsara, external: true } }`
-  # and reach Hydra (http://hydra:4444 public, http://hydra:4445 admin) and nginx by service name.
+  # and reach Hydra (http://hydra:4444 public, http://hydra:4445 admin) by service name. A container there with caddy
+  # labels is a site.
   default:
     name: kcsara

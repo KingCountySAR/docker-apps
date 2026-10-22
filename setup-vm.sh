@@ -25,7 +25,7 @@ if [ ! -f /etc/docker/daemon.json ]; then
   sudo systemctl restart docker
 fi
 
-sudo mkdir -p $root/config $root/data/postgres $root/data/letsencrypt $root/data/acme-challenge
+sudo mkdir -p $root/config $root/data/postgres $root/data/caddy
 sudo chown -R "$USER": $root
 chmod 700 $root/config
 
