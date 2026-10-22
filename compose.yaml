@@ -130,6 +130,120 @@ services:
     restart: unless-stopped
     init: true
 
+  # Makes sure the reports' database and user exist, from DATABASE_URL in config/reports-db.env (made by bin/secrets.sh),
+  # then exits.
+  reports-db:
+    image: *postgres-image
+    profiles: [full, reports]
+    env_file: [./config/reports-db.env, ./config/postgres.env]
+    environment:
+      DATABASE_URL_FROM: DATABASE_URL
+    volumes:
+      - ./postgres:/scripts:ro
+    command: ["sh", "/scripts/create-database.sh"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: on-failure
+
+  # KCSARA Reports (profiles full and reports), at reports.kingcountysar.org: one file, apps/reports/db-reporting.mjs,
+  # built by `npm run build` in the db-reporting repo and copied here by `node deploy.mjs reports`. Its data is in the
+  # shared postgres (the reporting database), loaded from D4H by reports-etl.
+  reports:
+    image: node:22-alpine
+    profiles: [full, reports]
+    env_file: &reports-env [./config/reports-db.env, ./config/reports.env]
+    environment: &reports-environment
+      NODE_ENV: production
+      PORT: 3000
+      # D4H comes from cedar, with a client_credentials token from Hydra (its client is CEDAR_CLIENT_ID and
+      # CEDAR_CLIENT_SECRET in config/reports.env). Both straight over this network: the app only uses JWT_ISSUER for
+      # the token address (<issuer>oauth2/token).
+      JWT_ISSUER: http://hydra:4444/
+      CEDAR_URL: http://cedar:3040
+    volumes: &reports-volumes
+      - ./apps/reports:/app:ro
+    working_dir: /app
+    user: node
+    # Waits for the first `node deploy.mjs reports`, rather than failing over and over without its file.
+    command: ["sh", "-c", "until [ -f db-reporting.mjs ]; do sleep 10; done; exec node --enable-source-maps db-reporting.mjs"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+    depends_on:
+      reports-db: { condition: service_completed_successfully }
+    restart: unless-stopped
+    init: true
+
+  # The reports' D4H sync, through cedar: the same file, run as `node db-reporting.mjs etl` every night at 10:00 UTC
+  # (2 or 3 in the morning in Seattle). To run it now: `docker compose exec reports-etl node db-reporting.mjs etl` on the
+  # VM (add --force when D4H has far fewer records than last time).
+  reports-etl:
+    image: node:22-alpine
+    profiles: [full, reports]
+    env_file: *reports-env
+    environment: *reports-environment
+    volumes: *reports-volumes
+    working_dir: /app
+    user: node
+    command:
+      - sh
+      - -c
+      - >-
+        while true;
+        do next=$$(date -u -d "$$(date -u +%Y-%m-%d) 10:00:00" +%s); now=$$(date -u +%s);
+        [ "$$next" -gt "$$now" ] || next=$$((next + 86400)); sleep $$((next - now));
+        [ ! -f db-reporting.mjs ] || node --enable-source-maps db-reporting.mjs etl;
+        done
+    depends_on:
+      reports-db: { condition: service_completed_successfully }
+    restart: unless-stopped
+    init: true
+
+  # Makes sure Respond's database and user exist, from DATABASE_URL in config/respond-db.env (made by bin/secrets.sh),
+  # then exits.
+  respond-db:
+    image: *postgres-image
+    profiles: [full, respond]
+    env_file: [./config/respond-db.env, ./config/postgres.env]
+    environment:
+      DATABASE_URL_FROM: DATABASE_URL
+    volumes:
+      - ./postgres:/scripts:ro
+    command: ["sh", "/scripts/create-database.sh"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: on-failure
+
+  # Respond (profiles full and respond): the respond-sync (Mission Sync) repo's build, a folder rather than one file:
+  # apps/respond/current/ holds index.mjs (the server), public/ (the UI it serves), seed.mjs and import-legacy.mjs, copied there by
+  # `node deploy.mjs respond`. Each organization's site is a host name in nginx/sites/ (see nginx/respond.inc); the
+  # app tells them apart by host name. Its data, and the organizations, are in the shared postgres (respond database).
+  respond:
+    image: node:22-alpine
+    profiles: [full, respond]
+    # DATABASE_URL and SECRETS_KEY (made by bin/secrets.sh), then SITE_ADMINS and such
+    env_file: [./config/respond-db.env, ./config/respond.env]
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+    volumes:
+      - ./apps/respond:/app:ro
+    working_dir: /app
+    user: node
+    # Waits for the first `node deploy.mjs respond`, rather than failing over and over without its files.
+    command: ["sh", "-c", "until [ -f current/index.mjs ]; do sleep 10; done; cd current && exec node --enable-source-maps index.mjs"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+    depends_on:
+      respond-db: { condition: service_completed_successfully }
+    restart: unless-stopped
+    init: true
+
   nginx:
     image: nginx:stable-alpine
     ports:

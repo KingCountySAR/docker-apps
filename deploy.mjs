@@ -13,7 +13,17 @@ const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-opti
   rad [bundle]          Copy the RAD portal's build (../rad-portal/server/dist/rad-portal.mjs, unless given) to
                         ${ROOT}/apps/rad, and restart it
   cedar [bundle]        The same for cedar (../cedar/dist/cedar.mjs)
-  status                What's running
+  reports [bundle]      The same for KCSARA Reports (../db-reporting/server/dist/db-reporting.mjs)
+  respond [folder]      Copy Respond's build, a folder (../respond-sync/dist, unless given), to
+                        ${ROOT}/apps/respond/current (keeping the one before as previous), and restart it
+  seed-respond <file>   Import a Respond seed file (organizations, providers, site admins) into its database, and
+                        restart it. The file goes to the import on its standard input, never onto the VM's disk
+  import-respond <folder> [--dry-run]
+                        Import respond-next's activities and saved locations from a mongoexport folder (its
+                        *.activities.json and *.locations.json) into Respond's database, skipping those already there,
+                        and restart it. Seed the organizations, with their legacyId, first. With --dry-run, only say
+                        what it would import. The files stay off the VM's disk, as with seed-respond
+  status               What's running
   logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, nginx, grafana, ...), or all of them;
                         with -f (--follow), then what's logged after, until Ctrl+C
 
@@ -50,7 +60,7 @@ async function deployVm() {
     `cd ${ROOT}`,
     'rm -rf .incoming',
     // apps/ has each app's build, copied by its own command (like `rad`); made here so docker doesn't make it, as root.
-    `mkdir -p .incoming ${FOLDERS.join(' ')} config apps/rad apps/cedar`,
+    `mkdir -p .incoming ${FOLDERS.join(' ')} config apps/rad apps/cedar apps/reports apps/respond`,
     'tar -xz -C .incoming',
     // Replaces the files inside each folder, keeping the folders: a running container's mount of a folder that was
     // removed and made again still shows the old, empty one.
@@ -82,6 +92,8 @@ async function deployVm() {
 const APPS = {
   rad: { file: 'rad-portal.mjs', build: ['rad-portal', 'server', 'dist', 'rad-portal.mjs'], repo: 'rad-portal' },
   cedar: { file: 'cedar.mjs', build: ['cedar', 'dist', 'cedar.mjs'], repo: 'cedar' },
+  // reports-etl runs the same file, and picks up the new one on its next run.
+  reports: { file: 'db-reporting.mjs', build: ['db-reporting', 'server', 'dist', 'db-reporting.mjs'], repo: 'db-reporting' },
 };
 
 async function deployApp(app, bundle = path.join(here, '..', ...APPS[app].build)) {
@@ -110,6 +122,72 @@ async function deployApp(app, bundle = path.join(here, '..', ...APPS[app].build)
   ], { files, cwd: path.dirname(bundle) });
 }
 
+// Respond's build is a folder (the server, the UI it serves, and its seed import): apps/respond/current, run by the
+// respond service in compose.yaml.
+const RESPOND_BUILD = path.join(here, '..', 'respond-sync', 'dist');
+
+async function deployRespond(dir = RESPOND_BUILD) {
+  dir = path.resolve(dir);
+  if (!fs.existsSync(path.join(dir, 'index.mjs'))) fail(`No ${path.join(dir, 'index.mjs')}. Run \`npm run build\` in respond-sync first, or give the build folder's path.`);
+  console.log(`Deploying ${dir} to ${ROOT}/apps/respond/current`);
+  await onVm([
+    `mkdir -p ${ROOT}/apps/respond`,
+    `cd ${ROOT}/apps/respond`,
+    'rm -rf .incoming',
+    'mkdir .incoming',
+    'tar -xz -C .incoming',
+    // Swapped in whole, so the app never starts from a half-copied folder. The build before stays as previous: to go
+    // back, swap the two by hand and restart.
+    'rm -rf previous',
+    '{ [ ! -d current ] || mv current previous; }',
+    'mv .incoming current',
+    `cd ${ROOT}`,
+    `{ [ -f config/respond.env ] || { echo 'Copied. Before it can start, create ${ROOT}/config/respond.env from respond.env.example next to it, then run node deploy.mjs vm.'; exit 0; }; }`,
+    // Restarts it with the new build if it's running; otherwise it starts with the next `node deploy.mjs vm` (with its
+    // profile on).
+    '{ [ -z "$(docker compose ps -q respond 2> /dev/null)" ] || docker compose restart respond; }',
+    'docker compose ps',
+  ], { files: fs.readdirSync(dir), cwd: dir });
+}
+
+async function seedRespond(file) {
+  if (!file) fail(`Give the seed file: node deploy.mjs seed-respond <file>\n\n${USAGE}`);
+  file = path.resolve(file);
+  if (!fs.existsSync(file)) fail(`No ${file}.`);
+  console.log(`Importing ${file} into Respond's database`);
+  await onVm([
+    `cd ${ROOT}`,
+    `{ [ -f apps/respond/current/seed.mjs ] || { echo 'No Respond build on the VM yet: run node deploy.mjs respond first.'; exit 1; }; }`,
+    // The file arrives in a tar on standard input, and goes from it straight to the import (seed.mjs reads - as
+    // standard input), in a one-off container with the app's database and SECRETS_KEY.
+    'tar -xzO | docker compose run --rm -T respond node --enable-source-maps current/seed.mjs -',
+    // The app reads the organizations when it starts.
+    '{ [ -z "$(docker compose ps -q respond 2> /dev/null)" ] || docker compose restart respond; }',
+  ], { files: [path.basename(file)], cwd: path.dirname(file) });
+}
+
+async function importRespond(folder, dryRun) {
+  if (!folder) fail(`Give the export folder: node deploy.mjs import-respond <folder> [--dry-run]\n\n${USAGE}`);
+  folder = path.resolve(folder);
+  if (!fs.existsSync(folder)) fail(`No ${folder}.`);
+  // Only the two collections the import reads, not the rest of the export.
+  const files = ['.activities.json', '.locations.json'].map(suffix => {
+    const names = fs.readdirSync(folder).filter(n => n.endsWith(suffix));
+    return names.length === 1 ? names[0] : fail(`${folder}: expected one *${suffix}, found ${names.length ? names.join(', ') : 'none'}`);
+  });
+  console.log(`Importing ${files.join(' and ')} into Respond's database${dryRun ? ' (dry run)' : ''}`);
+  const run = `mkdir /tmp/export && tar -xz -C /tmp/export && node --enable-source-maps current/import-legacy.mjs /tmp/export${dryRun ? ' --dry-run' : ''}`;
+  await onVm([
+    `cd ${ROOT}`,
+    `{ [ -f apps/respond/current/import-legacy.mjs ] || { echo 'No import-legacy.mjs in the Respond build on the VM: run node deploy.mjs respond first.'; exit 1; }; }`,
+    // The tar goes on standard input to a one-off container (with the app's database and SECRETS_KEY), which unpacks
+    // it inside itself, where it's removed with the container.
+    `docker compose run --rm -T respond sh -c ${quote(run)}`,
+    // The app adds imported activities to its list and archive when it starts.
+    ...(dryRun ? [] : ['{ [ -z "$(docker compose ps -q respond 2> /dev/null)" ] || docker compose restart respond; }']),
+  ], { files, cwd: folder });
+}
+
 async function setupVm() {
   // Copied over first, then run with a terminal, so sudo can ask for your password.
   const script = '/tmp/kcsara-setup-vm.sh';
@@ -119,7 +197,8 @@ async function setupVm() {
 
 const argv = process.argv.slice(2);
 const follow = argv[0] === 'logs' && ['-f', '--follow'].some(flag => argv.includes(flag));
-const [command, arg] = parseArgs(argv.filter(a => !follow || (a !== '-f' && a !== '--follow')), USAGE);
+const dryRun = argv[0] === 'import-respond' && argv.includes('--dry-run');
+const [command, arg] = parseArgs(argv.filter(a => !(follow && (a === '-f' || a === '--follow')) && !(dryRun && a === '--dry-run')), USAGE);
 switch (command) {
   case 'setup':
     await setupVm();
@@ -129,7 +208,17 @@ switch (command) {
     break;
   case 'rad':
   case 'cedar':
+  case 'reports':
     await deployApp(command, arg);
+    break;
+  case 'respond':
+    await deployRespond(arg);
+    break;
+  case 'seed-respond':
+    await seedRespond(arg);
+    break;
+  case 'import-respond':
+    await importRespond(arg, dryRun);
     break;
   case 'status':
     await onVm([`cd ${ROOT}`, 'docker compose ps']);

@@ -33,6 +33,25 @@ END
   echo "made config/postgres-exporter.env"
 fi
 
+if [ ! -f reports-db.env ]; then
+  cat > reports-db.env << END
+# Made by bin/secrets.sh. reports-db creates the reporting user and database from DATABASE_URL, with its password.
+DATABASE_URL=postgres://reporting:$(random 24)@postgres:5432/reporting
+END
+  echo "made config/reports-db.env"
+fi
+
+if [ ! -f respond-db.env ]; then
+  cat > respond-db.env << END
+# Made by bin/secrets.sh. respond-db creates the respond user and database from DATABASE_URL, with its password.
+DATABASE_URL=postgres://respond:$(random 24)@postgres:5432/respond
+# Encrypts the client secrets of Respond's member and sign-in providers in its database: 32 random bytes, in base64.
+# Without it they can't be read, and have to be entered again.
+SECRETS_KEY=$(openssl rand -base64 32)
+END
+  echo "made config/respond-db.env"
+fi
+
 if [ ! -f grafana.env ]; then
   cat > grafana.env << END
 # Made by bin/secrets.sh. Grafana's settings as GF_<SECTION>_<KEY>, overriding monitoring/grafana/grafana.ini.

@@ -51,6 +51,16 @@ services:
   cedar:
     profiles: !override [vm]
 
+  # And the reports (`npm run dev` there, with its own dev database).
+  reports-db:
+    profiles: !override [vm]
+
+  reports:
+    profiles: !override [vm]
+
+  reports-etl:
+    profiles: !override [vm]
+
   # Monitoring, with `docker compose --profile monitoring up`: Grafana on http://localhost:3030 (admin / dev-only).
   grafana:
     env_file: !reset []
