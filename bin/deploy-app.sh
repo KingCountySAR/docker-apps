@@ -1,8 +1,7 @@
 #!/bin/sh
 # Deploys an app that brings its own compose.yaml, from a gzipped tar on standard input: the app's deploy/ folder
 # (compose.yaml, app.json, ...) and its build's files, all in one folder. `node deploy.mjs app <repo>` sends it; a
-# GitHub workflow can too, through an ssh key that may only run this (see "Apps with their own compose.yaml" in the
-# README).
+# GitHub workflow can too, through an ssh key that may only run this (see "Apps" in the README).
 #
 #   sh /srv/kcsara/bin/deploy-app.sh <name> < app.tar.gz
 #
@@ -21,14 +20,6 @@ case $name in
 esac
 root=$(cd "$(dirname "$0")/.." && pwd)
 app=$root/apps/$name
-
-# apps/rad, apps/cedar, ... hold builds that the VM's own compose.yaml runs (node deploy.mjs <name>), not apps like this:
-# files of their own, or (Respond) a current folder without a compose.yaml.
-if [ -n "$(ls -A "$app" 2> /dev/null | grep -vxE 'config|current|previous|\.incoming')" ] ||
-  { [ -d "$app/current" ] && [ ! -f "$app/current/compose.yaml" ]; }; then
-  echo "$app is an app the VM's compose.yaml runs: deploy it with node deploy.mjs $name" >&2
-  exit 1
-fi
 
 mkdir -p "$app/config"
 cd "$app"

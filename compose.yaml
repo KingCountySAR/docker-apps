@@ -1,4 +1,6 @@
-# Production stack on the VM, in /srv/kcsara. Copied there by `node deploy.mjs vm`.
+# Production stack on the VM, in /srv/kcsara. Copied there by `node deploy.mjs vm`. What the apps share: postgres,
+# Hydra (sign-in tokens), Caddy (the way in) and monitoring. The apps themselves (RAD, cedar, reports, Respond) each
+# bring their own compose.yaml, in apps/<name>/ (see "Apps" in the README).
 # Configuration and data stay on the VM:
 #   config/*.env            environment for each service. bin/secrets.sh makes postgres.env and hydra.env; the
 #                           others start from config/*.env.example
@@ -7,14 +9,14 @@
 # Only Caddy is reachable from outside, on ports 80 and 443. Hydra's admin API (4445) has no authentication of its
 # own: it's only on this network and the VM's loopback address, never through Caddy.
 #
-# A service with a site has caddy labels (see caddy/Caddyfile): its host names, and where Caddy passes requests. Each
-# host name list can be changed without changing this file, as <APP>_HOSTS in .env next to it (see "Testing under
-# another name" in the README).
+# A service with a site has caddy labels (see caddy/Caddyfile): its host names, and where Caddy passes requests.
+# Hydra's can be changed without changing this file, as HYDRA_HOSTS in .env next to it (see "Testing under another
+# name" in the README).
 name: kcsara
 
-# Profiles choose what runs besides the core here (postgres, hydra, caddy), which always does. Each optional
-# part is in `full` and in its own profile (`monitoring`, ...). On the VM, COMPOSE_PROFILES in .env picks them for every
-# docker compose command there: `full` unless changed (see "Choosing what runs" in the README).
+# Profiles choose what runs besides the core here (postgres, hydra, caddy), which always does: `monitoring`, also in
+# `full`. On the VM, COMPOSE_PROFILES in .env picks them for every docker compose command there: `full` unless changed
+# (see "Choosing what runs" in the README).
 
 # Prometheus, Grafana and what they collect from: profiles full and monitoring.
 include:
@@ -22,8 +24,8 @@ include:
     project_directory: .
 
 services:
-  # Shared by the apps: each has its own database and user, made by its <app>-db service (or, for an app with its own
-  # compose.yaml, bin/app-database.sh). On this network (postgres:5432), and the VM's loopback address, never outside.
+  # Shared by the apps: each has its own database and user, made by bin/app-database.sh (Hydra's by hydra-db).
+  # On this network (postgres:5432), and the VM's loopback address, never outside.
   # As the superuser: `docker compose exec postgres psql -U postgres` on the VM.
   postgres:
     image: &postgres-image postgres:17-alpine
@@ -42,11 +44,10 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # Makes sure Hydra's database and user exist, from its DSN, then exits. Each app that uses postgres has one of these
-  # (copy this one); see postgres/create-database.sh.
+  # Makes sure Hydra's database and user exist, from its DSN, then exits; see postgres/create-database.sh.
   hydra-db:
     image: *postgres-image
-    # The app's env file first, so postgres.env's POSTGRES_PASSWORD wins if the app's has one too.
+    # Hydra's env file first, so postgres.env's POSTGRES_PASSWORD wins if Hydra's has one too.
     env_file: [./config/hydra.env, ./config/postgres.env]
     environment:
       DATABASE_URL_FROM: DSN
@@ -87,120 +88,6 @@ services:
     depends_on:
       hydra-migrate: { condition: service_completed_successfully }
     restart: unless-stopped
-
-  # The RAD portal (profiles full and rad), at rad.kingcountysar.org: one file, apps/rad/rad-portal.mjs, built by
-  # `npm run build` in the rad-portal repo and copied here by `node deploy.mjs rad`. Its MongoDB is in Atlas
-  # (MONGODB_URI in config/rad.env).
-  rad:
-    image: node:22-alpine
-    profiles: [full, rad]
-    env_file: ./config/rad.env
-    environment:
-      NODE_ENV: production
-      PORT: 3000
-      # Members' D4H qualifications come from cedar, with a client_credentials token from Hydra (its client is
-      # CEDAR_CLIENT_ID and CEDAR_CLIENT_SECRET in config/rad.env). Both straight over this network, not the internet:
-      # the portal only uses JWT_ISSUER for the token address (<issuer>oauth2/token).
-      JWT_ISSUER: http://hydra:4444/
-      CEDAR_URL: http://cedar:3040
-    volumes:
-      - ./apps/rad:/app:ro
-    working_dir: /app
-    user: node
-    # Waits for the first `node deploy.mjs rad`, rather than failing over and over without its file.
-    command: ["sh", "-c", "until [ -f rad-portal.mjs ]; do sleep 10; done; exec node --enable-source-maps rad-portal.mjs"]
-    labels:
-      caddy: ${RAD_HOSTS:-rad.kingcountysar.org}
-      caddy.import: site
-      caddy.reverse_proxy: rad:3000
-      kcsara.health: /health
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 30s
-    restart: unless-stopped
-    init: true
-
-  # cedar (profiles full and cedar), at cedar.kingcountysar.org: an API in front of other KCSARA systems (D4H, ...),
-  # for clients with tokens from Hydra. One file, apps/cedar/cedar.mjs, built by `npm run build` in the cedar repo and
-  # copied here by `node deploy.mjs cedar`. Settings and its D4H token are in config/cedar.env.
-  cedar:
-    image: node:22-alpine
-    profiles: [full, cedar]
-    env_file: ./config/cedar.env
-    environment:
-      NODE_ENV: production
-      PORT: 3040
-      # Hydra's keys, straight from Hydra on this network rather than through the internet and Caddy. Tokens must still
-      # name JWT_ISSUER (in config/cedar.env).
-      JWT_URL: http://hydra:4444/
-    volumes:
-      - ./apps/cedar:/app:ro
-    working_dir: /app
-    user: node
-    # Waits for the first `node deploy.mjs cedar`, rather than failing over and over without its file.
-    command: ["sh", "-c", "until [ -f cedar.mjs ]; do sleep 10; done; exec node --enable-source-maps cedar.mjs"]
-    labels:
-      caddy: ${CEDAR_HOSTS:-cedar.kingcountysar.org}
-      caddy.import: site
-      caddy.reverse_proxy: cedar:3040
-      kcsara.health: /health
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3040/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 30s
-    restart: unless-stopped
-    init: true
-
-  # Makes sure Respond's database and user exist, from DATABASE_URL in config/respond-db.env (made by bin/secrets.sh),
-  # then exits.
-  respond-db:
-    image: *postgres-image
-    profiles: [full, respond]
-    env_file: [./config/respond-db.env, ./config/postgres.env]
-    environment:
-      DATABASE_URL_FROM: DATABASE_URL
-    volumes:
-      - ./postgres:/scripts:ro
-    command: ["sh", "/scripts/create-database.sh"]
-    depends_on:
-      postgres: { condition: service_healthy }
-    restart: on-failure
-
-  # Respond (profiles full and respond): the respond-sync (Mission Sync) repo's build, a folder rather than one file:
-  # apps/respond/current/ holds index.mjs (the server), public/ (the UI it serves), seed.mjs and import-legacy.mjs, copied there by
-  # `node deploy.mjs respond`. Each organization's site is a host name in its caddy label (RESPOND_HOSTS in .env); the
-  # app tells them apart by host name, and its live sync (/api/sync) is a WebSocket, which Caddy passes on as it is. Its data, and the organizations, are in the shared postgres (respond database).
-  respond:
-    image: node:22-alpine
-    profiles: [full, respond]
-    # DATABASE_URL and SECRETS_KEY (made by bin/secrets.sh), then SITE_ADMINS and such
-    env_file: [./config/respond-db.env, ./config/respond.env]
-    environment:
-      NODE_ENV: production
-      PORT: 4000
-    volumes:
-      - ./apps/respond:/app:ro
-    working_dir: /app
-    user: node
-    # Waits for the first `node deploy.mjs respond`, rather than failing over and over without its files.
-    command: ["sh", "-c", "until [ -f current/index.mjs ]; do sleep 10; done; cd current && exec node --enable-source-maps index.mjs"]
-    labels:
-      caddy: ${RESPOND_HOSTS:-respond.kingcountysar.org}
-      caddy.import: site
-      caddy.reverse_proxy: respond:4000
-      kcsara.health: /health
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4000/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 30s
-    depends_on:
-      respond-db: { condition: service_completed_successfully }
-    restart: unless-stopped
-    init: true
 
   # The way in from outside, on ports 80 and 443 (and 443 over UDP, for HTTP/3): caddy-docker-proxy, Caddy built
   # with a plugin that makes each site from the labels on the containers (see caddy/Caddyfile). It watches Docker, so a

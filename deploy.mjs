@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Sets up the VM and copies this folder's files to it, from Windows, macOS or Linux. See lib/vm.mjs for the settings
 // (DEPLOY_HOST and such, in .env).
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,27 +12,20 @@ const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-opti
   setup                 Install Docker and create ${ROOT} on a fresh VM (asks for your sudo password)
   vm                    Copy compose.yaml, hydra/, caddy/, postgres/, monitoring/, bin/ and the config examples, make
                         any missing secrets, and apply them
-  rad [bundle]          Copy the RAD portal's build (../rad-portal/server/dist/rad-portal.mjs, unless given) to
-                        ${ROOT}/apps/rad, and restart it
-  cedar [bundle]        The same for cedar (../cedar/dist/cedar.mjs)
-  respond [folder]      Copy Respond's build, a folder (../respond-sync/dist, unless given), to
-                        ${ROOT}/apps/respond/current (keeping the one before as previous), and restart it
-  seed-respond <file>   Import a Respond seed file (organizations, providers, site admins) into its database, and
-                        restart it. The file goes to the import on its standard input, never onto the VM's disk
-  import-respond <folder> [--dry-run]
-                        Import respond-next's activities and saved locations from a mongoexport folder (its
-                        *.activities.json and *.locations.json) into Respond's database, skipping those already there,
-                        and restart it. Seed the organizations, with their legacyId, first. With --dry-run, only say
-                        what it would import. The files stay off the VM's disk, as with seed-respond
-  app <repo>            Deploy an app that brings its own compose.yaml: its repo's deploy/ folder, and the build
-                        files its deploy/app.json lists, to ${ROOT}/apps/<name> (see "Apps with their own
-                        compose.yaml" in the README). Build it first
+  app <repo>            Deploy an app from its repo: its deploy/ folder (with its compose.yaml), and the build files
+                        its deploy/app.json lists, to ${ROOT}/apps/<name> (see "Apps" in the README). Build it first
   database <name> [database]
                         Give such an app a database and user in the shared postgres, with its URL in
                         ${ROOT}/apps/<name>/config/database.env. The database is the name with _ for -, unless given
-  status                What's running
-  logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, caddy, grafana, ...), or all of them;
-                        with -f (--follow), then what's logged after, until Ctrl+C
+  exec <app> <service> [--put <path>]... -- <command>
+                        Run a command in an app's running container (like a script in its build), with your terminal,
+                        or this end's standard input. With --put, the files or folders go first to a temporary folder in
+                        the container, removed after, and {put} in the command is that folder
+  restart <name>        Restart an app (all its services), or one of this project's services
+  status                What's running, and each app's compose project
+  logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, caddy, grafana, ...), or all of an
+                        app's (rad, cedar, reports, respond, ...), or all of this project's; with -f (--follow), then
+                        what's logged after, until Ctrl+C
 
 ${SSH_USAGE}
 
@@ -66,8 +60,8 @@ async function deployVm() {
   await onVm([
     `cd ${ROOT}`,
     'rm -rf .incoming',
-    // apps/ has each app's build, copied by its own command (like `rad`); made here so docker doesn't make it, as root.
-    `mkdir -p .incoming ${FOLDERS.join(' ')} config apps/rad apps/cedar apps/respond`,
+    // apps/ has each app with its own compose.yaml (node deploy.mjs app); made here so docker doesn't make it, as root.
+    `mkdir -p .incoming ${FOLDERS.join(' ')} config apps`,
     'tar -xz -C .incoming',
     // Replaces the files inside each folder, keeping the folders: a running container's mount of a folder that was
     // removed and made again still shows the old, empty one.
@@ -89,107 +83,51 @@ async function deployVm() {
   ], { files: ['compose.yaml', ...FOLDERS, ...examples], cwd: here });
 }
 
-// Apps that run from one built file, copied to apps/<name>/ by `node deploy.mjs <name>`: the service in compose.yaml,
-// the file it runs, and where the build is, in the app's repo next to this one.
-const APPS = {
-  rad: { file: 'rad-portal.mjs', build: ['rad-portal', 'server', 'dist', 'rad-portal.mjs'], repo: 'rad-portal' },
-  cedar: { file: 'cedar.mjs', build: ['cedar', 'dist', 'cedar.mjs'], repo: 'cedar' },
-};
+// Running something in an app's container, always the running one: a one-off container (`docker compose run`) would
+// carry the service's caddy labels, making its sites twice for Caddy.
+const NAME = /^[a-z0-9][a-z0-9_.-]*$/;
 
-async function deployApp(app, bundle = path.join(here, '..', ...APPS[app].build)) {
-  const { file, repo } = APPS[app];
-  bundle = path.resolve(bundle);
-  if (!fs.existsSync(bundle)) fail(`No ${bundle}. Run \`npm run build\` in ${repo} first, or give the bundle's path.`);
-  const name = path.basename(bundle);
-  const files = [name, ...(fs.existsSync(`${bundle}.map`) ? [`${name}.map`] : [])];
-  console.log(`Deploying ${bundle} to ${ROOT}/apps/${app}`);
-  await onVm([
-    `mkdir -p ${ROOT}/apps/${app}`,
-    `cd ${ROOT}/apps/${app}`,
-    'rm -rf .incoming',
-    'mkdir .incoming',
-    'tar -xz -C .incoming',
-    // Moved into place whole, under the name compose.yaml runs, so the app never starts from a half-copied file.
-    `mv -f .incoming/${quote(name)} ${file}`,
-    `{ [ ! -f .incoming/${quote(`${name}.map`)} ] || mv -f .incoming/${quote(`${name}.map`)} ${file}.map; }`,
-    'rm -rf .incoming',
-    `cd ${ROOT}`,
-    `{ [ -f config/${app}.env ] || { echo 'Copied. Before it can start, create ${ROOT}/config/${app}.env from ${app}.env.example next to it, then run node deploy.mjs vm.'; exit 0; }; }`,
-    // Restarts it with the new file if it's running; otherwise it starts with the next `node deploy.mjs vm` (with its
-    // profile on).
-    `{ [ -z "$(docker compose ps -q ${app} 2> /dev/null)" ] || docker compose restart ${app}; }`,
-    'docker compose ps',
-  ], { files, cwd: path.dirname(bundle) });
-}
+/** Shell commands going to an app's folder on the VM, checking that its service is running */
+const appRunning = (app, service) => [
+  `{ [ -f ${ROOT}/apps/${app}/current/compose.yaml ] || { echo ${quote(`No app ${app} on the VM: deploy it with node deploy.mjs app <repo>.`)}; exit 1; }; }`,
+  `cd ${ROOT}/apps/${app}/current`,
+  `{ [ -n "$(docker compose ps -q ${service} 2> /dev/null)" ] || { echo ${quote(`${app}'s ${service} isn't running.`)}; exit 1; }; }`,
+];
 
-// Respond's build is a folder (the server, the UI it serves, and its seed import): apps/respond/current, run by the
-// respond service in compose.yaml.
-const RESPOND_BUILD = path.join(here, '..', 'respond-sync', 'dist');
-
-async function deployRespond(dir = RESPOND_BUILD) {
-  dir = path.resolve(dir);
-  if (!fs.existsSync(path.join(dir, 'index.mjs'))) fail(`No ${path.join(dir, 'index.mjs')}. Run \`npm run build\` in respond-sync first, or give the build folder's path.`);
-  console.log(`Deploying ${dir} to ${ROOT}/apps/respond/current`);
-  await onVm([
-    `mkdir -p ${ROOT}/apps/respond`,
-    `cd ${ROOT}/apps/respond`,
-    'rm -rf .incoming',
-    'mkdir .incoming',
-    'tar -xz -C .incoming',
-    // Swapped in whole, so the app never starts from a half-copied folder. The build before stays as previous: to go
-    // back, swap the two by hand and restart.
-    'rm -rf previous',
-    '{ [ ! -d current ] || mv current previous; }',
-    'mv .incoming current',
-    `cd ${ROOT}`,
-    `{ [ -f config/respond.env ] || { echo 'Copied. Before it can start, create ${ROOT}/config/respond.env from respond.env.example next to it, then run node deploy.mjs vm.'; exit 0; }; }`,
-    // Restarts it with the new build if it's running; otherwise it starts with the next `node deploy.mjs vm` (with its
-    // profile on).
-    '{ [ -z "$(docker compose ps -q respond 2> /dev/null)" ] || docker compose restart respond; }',
-    'docker compose ps',
-  ], { files: fs.readdirSync(dir), cwd: dir });
-}
-
-async function seedRespond(file) {
-  if (!file) fail(`Give the seed file: node deploy.mjs seed-respond <file>\n\n${USAGE}`);
-  file = path.resolve(file);
-  if (!fs.existsSync(file)) fail(`No ${file}.`);
-  console.log(`Importing ${file} into Respond's database`);
-  await onVm([
-    `cd ${ROOT}`,
-    `{ [ -f apps/respond/current/seed.mjs ] || { echo 'No Respond build on the VM yet: run node deploy.mjs respond first.'; exit 1; }; }`,
-    `{ [ -n "$(docker compose ps -q respond 2> /dev/null)" ] || { echo 'Respond is not running: start it with node deploy.mjs vm first.'; exit 1; }; }`,
-    // The file arrives in a tar on standard input, and goes from it straight to the import (seed.mjs reads - as
-    // standard input), run in the app's container, with its database and SECRETS_KEY. Not in a one-off container
-    // (`docker compose run`): that would carry the service's caddy labels, making Respond's sites twice for Caddy.
-    'tar -xzO | docker compose exec -T respond node --enable-source-maps current/seed.mjs -',
-    // The app reads the organizations when it starts.
-    'docker compose restart respond',
-  ], { files: [path.basename(file)], cwd: path.dirname(file) });
-}
-
-async function importRespond(folder, dryRun) {
-  if (!folder) fail(`Give the export folder: node deploy.mjs import-respond <folder> [--dry-run]\n\n${USAGE}`);
-  folder = path.resolve(folder);
-  if (!fs.existsSync(folder)) fail(`No ${folder}.`);
-  // Only the two collections the import reads, not the rest of the export.
-  const files = ['.activities.json', '.locations.json'].map(suffix => {
-    const names = fs.readdirSync(folder).filter(n => n.endsWith(suffix));
-    return names.length === 1 ? names[0] : fail(`${folder}: expected one *${suffix}, found ${names.length ? names.join(', ') : 'none'}`);
+async function execInApp(app, service, puts, command) {
+  if (!app || !service || !command.length) fail(`Give the app, its service and the command: node deploy.mjs exec <app> <service> [--put <path>]... -- <command>\n\n${USAGE}`);
+  for (const name of [app, service]) if (!NAME.test(name)) fail(`Not an app or service name: ${name}`);
+  if (!puts.length) {
+    // Your terminal reaches the command, or else this end's standard input (a file or pipe).
+    const tty = process.stdin.isTTY;
+    await onVm([...appRunning(app, service), ['docker', 'compose', 'exec', ...(tty ? [] : ['-T']), service, ...command].map(quote).join(' ')], { tty });
+    return;
+  }
+  const paths = puts.map(p => path.resolve(p));
+  const missing = paths.find(p => !fs.existsSync(p));
+  if (missing) fail(`No ${missing}.`);
+  const names = paths.map(p => path.basename(p));
+  const twice = names.find((name, i) => names.indexOf(name) !== i);
+  if (twice) fail(`Two of the --put files are ${twice}.`);
+  // All in one folder, sent as one tar, which the container unpacks into a folder of its own, where {put} in the command
+  // points. It's removed after, however the command ends, so the files never stay on the VM.
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'kcsara-put-'));
+  process.on('exit', () => fs.rmSync(staging, { recursive: true, force: true }));
+  for (const p of paths) fs.cpSync(p, path.join(staging, path.basename(p)), { recursive: true });
+  const dir = `/tmp/put-${crypto.randomBytes(8).toString('hex')}`;
+  const run = `mkdir -p ${dir} && tar -xz -C ${dir} && "$@"; status=$?; rm -rf ${dir}; exit $status`;
+  const args = command.map(a => a.replaceAll('{put}', dir));
+  await onVm([...appRunning(app, service), ['docker', 'compose', 'exec', '-T', service, 'sh', '-c', run, 'sh', ...args].map(quote).join(' ')], {
+    files: fs.readdirSync(staging),
+    cwd: staging,
   });
-  console.log(`Importing ${files.join(' and ')} into Respond's database${dryRun ? ' (dry run)' : ''}`);
-  const run = `dir=$(mktemp -d) && tar -xz -C "$dir" && node --enable-source-maps current/import-legacy.mjs "$dir"${dryRun ? ' --dry-run' : ''}; status=$?; rm -rf "$dir"; exit $status`;
-  await onVm([
-    `cd ${ROOT}`,
-    `{ [ -f apps/respond/current/import-legacy.mjs ] || { echo 'No import-legacy.mjs in the Respond build on the VM: run node deploy.mjs respond first.'; exit 1; }; }`,
-    `{ [ -n "$(docker compose ps -q respond 2> /dev/null)" ] || { echo 'Respond is not running: start it with node deploy.mjs vm first.'; exit 1; }; }`,
-    // The tar goes on standard input to the app's container (with its database and SECRETS_KEY; not a one-off
-    // container, as in seedRespond), which unpacks it into a temporary folder inside itself and removes it after.
-    `docker compose exec -T respond sh -c ${quote(run)}`,
-    // The app adds imported activities to its list and archive when it starts.
-    ...(dryRun ? [] : ['docker compose restart respond']),
-  ], { files, cwd: folder });
 }
+
+/** A shell command going to the project with `name`: an app's (all its services), or else this one, for its service `name` */
+const projectOf = name =>
+  name
+    ? `{ if [ -f apps/${quote(name)}/current/compose.yaml ]; then cd apps/${quote(name)}/current; service=''; else service=${quote(name)}; fi; }`
+    : "service=''";
 
 // Apps that bring their own compose.yaml, in a deploy/ folder in their repo, with app.json:
 //   { "name": "reports", "files": ["server/dist/db-reporting.mjs", "server/dist/db-reporting.mjs.map"] }
@@ -238,8 +176,18 @@ async function setupVm() {
 
 const argv = process.argv.slice(2);
 const follow = argv[0] === 'logs' && ['-f', '--follow'].some(flag => argv.includes(flag));
-const dryRun = argv[0] === 'import-respond' && argv.includes('--dry-run');
-const [command, arg, arg2] = parseArgs(argv.filter(a => !(follow && (a === '-f' || a === '--follow')) && !(dryRun && a === '--dry-run')), USAGE);
+// exec's command, after --, goes to the VM as it is; its --put options come out before parseArgs sees the rest.
+const split = argv[0] === 'exec' && argv.includes('--') ? argv.indexOf('--') : argv.length;
+const execCommand = argv.slice(split + 1);
+const puts = [];
+const options = argv.slice(0, split).filter((a, i, all) => {
+  if (argv[0] !== 'exec') return true;
+  if (a === '--put') return puts.push(all[i + 1] ?? fail(`--put needs a path
+
+${USAGE}`)) && false;
+  return all[i - 1] !== '--put';
+});
+const [command, arg, arg2] = parseArgs(options.filter(a => !(follow && (a === '-f' || a === '--follow'))), USAGE);
 switch (command) {
   case 'setup':
     await setupVm();
@@ -247,37 +195,36 @@ switch (command) {
   case 'vm':
     await deployVm();
     break;
-  case 'rad':
-  case 'cedar':
-    await deployApp(command, arg);
-    break;
-  case 'respond':
-    await deployRespond(arg);
-    break;
-  case 'seed-respond':
-    await seedRespond(arg);
-    break;
-  case 'import-respond':
-    await importRespond(arg, dryRun);
-    break;
   case 'app':
     await deployComposeApp(arg);
     break;
   case 'database':
     await appDatabase(arg, arg2);
     break;
-  case 'status':
-    await onVm([`cd ${ROOT}`, 'docker compose ps']);
+  case 'exec':
+    await execInApp(arg, arg2, puts, execCommand);
     break;
-  case 'logs':
+  case 'restart':
+    if (!arg) fail(`Give an app's name, or a service's: node deploy.mjs restart <name>
+
+${USAGE}`);
+    await onVm([`cd ${ROOT}`, projectOf(arg), 'docker compose restart $service']);
+    break;
+  case 'status':
+    // This project's services, then every project: this one and each app's.
+    await onVm([`cd ${ROOT}`, 'docker compose ps', 'echo', 'docker compose ls']);
+    break;
+  case 'logs': {
+    const where = projectOf(arg);
     if (follow) {
       // With a terminal on the VM, Ctrl+C stops docker compose there, rather than just this end of ssh; stopping that
       // way (exit 130) isn't a failure.
-      await onVm([`cd ${ROOT}`, `{ docker compose logs --tail 200 -f ${arg ? quote(arg) : ''} || [ $? -eq 130 ]; }`], { tty: process.stdout.isTTY });
+      await onVm([`cd ${ROOT}`, where, '{ docker compose logs --tail 200 -f $service || [ $? -eq 130 ]; }'], { tty: process.stdout.isTTY });
     } else {
-      await onVm([`cd ${ROOT}`, `docker compose logs --tail 200 ${arg ? quote(arg) : ''}`]);
+      await onVm([`cd ${ROOT}`, where, 'docker compose logs --tail 200 $service']);
     }
     break;
+  }
   default:
     fail(USAGE);
 }
