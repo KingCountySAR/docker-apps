@@ -22,14 +22,19 @@ include:
     project_directory: .
 
 services:
-  # Shared by the apps: each has its own database and user, made by its <app>-db service. Only on this network
-  # (postgres:5432), not published. As the superuser: `docker compose exec postgres psql -U postgres` on the VM.
+  # Shared by the apps: each has its own database and user, made by its <app>-db service (or, for an app with its own
+  # compose.yaml, bin/app-database.sh). On this network (postgres:5432), and the VM's loopback address, never outside.
+  # As the superuser: `docker compose exec postgres psql -U postgres` on the VM.
   postgres:
     image: &postgres-image postgres:17-alpine
     # POSTGRES_PASSWORD, the superuser's
     env_file: ./config/postgres.env
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+    # Only on the VM's own loopback address: `node db.mjs --tunnel` reaches it from your machine through ssh, for
+    # one-off jobs run from a dev machine (like db-reporting's legacy import).
+    ports:
+      - "127.0.0.1:15432:5432"
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres"]
       interval: 5s
@@ -146,82 +151,6 @@ services:
       interval: 30s
       timeout: 5s
       start_period: 30s
-    restart: unless-stopped
-    init: true
-
-  # Makes sure the reports' database and user exist, from DATABASE_URL in config/reports-db.env (made by bin/secrets.sh),
-  # then exits.
-  reports-db:
-    image: *postgres-image
-    profiles: [full, reports]
-    env_file: [./config/reports-db.env, ./config/postgres.env]
-    environment:
-      DATABASE_URL_FROM: DATABASE_URL
-    volumes:
-      - ./postgres:/scripts:ro
-    command: ["sh", "/scripts/create-database.sh"]
-    depends_on:
-      postgres: { condition: service_healthy }
-    restart: on-failure
-
-  # KCSARA Reports (profiles full and reports), at reports.kingcountysar.org: one file, apps/reports/db-reporting.mjs,
-  # built by `npm run build` in the db-reporting repo and copied here by `node deploy.mjs reports`. Its data is in the
-  # shared postgres (the reporting database), loaded from D4H by reports-etl.
-  reports:
-    image: node:22-alpine
-    profiles: [full, reports]
-    env_file: &reports-env [./config/reports-db.env, ./config/reports.env]
-    environment: &reports-environment
-      NODE_ENV: production
-      PORT: 3000
-      # D4H comes from cedar, with a client_credentials token from Hydra (its client is CEDAR_CLIENT_ID and
-      # CEDAR_CLIENT_SECRET in config/reports.env). Both straight over this network: the app only uses JWT_ISSUER for
-      # the token address (<issuer>oauth2/token).
-      JWT_ISSUER: http://hydra:4444/
-      CEDAR_URL: http://cedar:3040
-    volumes: &reports-volumes
-      - ./apps/reports:/app:ro
-    working_dir: /app
-    user: node
-    # Waits for the first `node deploy.mjs reports`, rather than failing over and over without its file.
-    command: ["sh", "-c", "until [ -f db-reporting.mjs ]; do sleep 10; done; exec node --enable-source-maps db-reporting.mjs"]
-    labels:
-      caddy: ${REPORTS_HOSTS:-reports.kingcountysar.org}
-      caddy.import: site
-      caddy.reverse_proxy: reports:3000
-      kcsara.health: /health
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
-      interval: 30s
-      timeout: 5s
-      start_period: 30s
-    depends_on:
-      reports-db: { condition: service_completed_successfully }
-    restart: unless-stopped
-    init: true
-
-  # The reports' D4H sync, through cedar: the same file, run as `node db-reporting.mjs etl` every night at 10:00 UTC
-  # (2 or 3 in the morning in Seattle). To run it now: `docker compose exec reports-etl node db-reporting.mjs etl` on the
-  # VM (add --force when D4H has far fewer records than last time).
-  reports-etl:
-    image: node:22-alpine
-    profiles: [full, reports]
-    env_file: *reports-env
-    environment: *reports-environment
-    volumes: *reports-volumes
-    working_dir: /app
-    user: node
-    command:
-      - sh
-      - -c
-      - >-
-        while true;
-        do next=$$(date -u -d "$$(date -u +%Y-%m-%d) 10:00:00" +%s); now=$$(date -u +%s);
-        [ "$$next" -gt "$$now" ] || next=$$((next + 86400)); sleep $$((next - now));
-        [ ! -f db-reporting.mjs ] || node --enable-source-maps db-reporting.mjs etl;
-        done
-    depends_on:
-      reports-db: { condition: service_completed_successfully }
     restart: unless-stopped
     init: true
 

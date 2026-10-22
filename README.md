@@ -37,7 +37,7 @@ A consolidated/modular system to collect apps and core services for King County 
 - **cedar** (profiles `cedar` and `full`) at https://cedar.kingcountysar.org: the [cedar](../cedar) API in front of
   other KCSARA systems (D4H, ...), for clients with tokens from Hydra. Also run from its one-file build. See
   [cedar](#cedar).
-- **KCSARA Reports** (profiles `reports` and `full`) at https://reports.kingcountysar.org: the
+- **KCSARA Reports** at https://reports.kingcountysar.org, deployed from its own repo: the
   [db-reporting](../db-reporting) app, with its data in the shared Postgres, loaded from D4H through cedar every night.
   See [KCSARA Reports](#kcsara-reports).
 - **Respond** (profiles `respond` and `full`), for now at https://respond-next.kcesar.org (a test name), later
@@ -70,12 +70,11 @@ whole machine, not each container.
   .env                           COMPOSE_PROFILES: which profiles run (full, unless changed), and any <APP>_HOSTS
   apps/rad/                      the RAD portal's build, rad-portal.mjs (node deploy.mjs rad)
   apps/cedar/                    cedar's build, cedar.mjs (node deploy.mjs cedar)
-  apps/reports/                  the reports' build, db-reporting.mjs (node deploy.mjs reports)
   apps/respond/                  Respond's build folder, current/ (and the one before, previous/) (node deploy.mjs respond)
   apps/<name>/                   an app with its own compose.yaml (node deploy.mjs app <repo>): current/ (and
                                  previous/), and its own config/ (see "Apps with their own compose.yaml")
-  config/                        settings and secrets: caddy.env, rad.env, cedar.env, reports.env and respond.env, and
-                                 postgres.env, hydra.env, reports-db.env, respond-db.env, grafana.env and
+  config/                        settings and secrets: caddy.env, rad.env, cedar.env and respond.env, and
+                                 postgres.env, hydra.env, respond-db.env, grafana.env and
                                  postgres-exporter.env (made by bin/secrets.sh)
   data/                          everything the services write
     postgres/                    the shared postgres: every app's database
@@ -126,7 +125,7 @@ A VM set up before Caddy has nginx and certbot. To move it over:
 ## Testing under another name
 
 A site's host names are its service's `caddy` label, which takes them from `<APP>_HOSTS` in `/srv/kcsara/.env` on
-the VM when that's set (`HYDRA_HOSTS`, `RAD_HOSTS`, `CEDAR_HOSTS`, `REPORTS_HOSTS`, `RESPOND_HOSTS`), so a test name never needs a change here:
+the VM when that's set (`HYDRA_HOSTS`, `RAD_HOSTS`, `CEDAR_HOSTS`, `RESPOND_HOSTS`; an app with its own compose.yaml has `HOSTS` in its `config/compose.env`), so a test name never needs a change here:
 
 1. On the VM, add the test name to `/srv/kcsara/.env`, with the real one if it should keep working too:
    `RAD_HOSTS=rad.kingcountysar.org, kcsara-rad.kcesar.org`.
@@ -183,28 +182,28 @@ Health checks ask for its `/health`.
 
 ## KCSARA Reports
 
-The `reports` service runs `apps/reports/db-reporting.mjs` on the VM, built by `npm run build` in the db-reporting
-repo. Caddy passes its site (its `caddy` labels) to it at `http://reports:3000`. Its data is in the shared postgres,
-in the `reporting` database (user `reporting`), which `reports-db` makes from `config/reports-db.env`. `reports-etl`
-runs the same file as `node db-reporting.mjs etl` every night at 10:00 UTC, loading D4H through cedar. Until the first
-build arrives, both wait.
+The [db-reporting](../db-reporting) app is an app with its own compose.yaml (see
+[Apps with their own compose.yaml](#apps-with-their-own-composeyaml)): its `deploy/` folder has its `reports` service
+(the site, at reports.kingcountysar.org) and `reports-etl` (the nightly D4H load, through cedar). Its data is in the
+shared postgres, in the `reporting` database (user `reporting`). Its configuration, deploying it and running the ETL
+by hand are in db-reporting's `docs/DEPLOY.md`; deploying is `npm run build` there, then `node deploy.mjs app
+../db-reporting` here.
 
-Setting it up:
+Its Hydra client, for the ETL, with the scopes in db-reporting's `docs/DESIGN.md`:
+`node hydra.mjs create oauth2-client --name "db-reporting ETL" --grant-type client_credentials --scope d4h:members.read,d4h:groups.read,d4h:qualifications.read,d4h:activities.read --format json`.
+Its id and secret go in its `app.env` as `CEDAR_CLIENT_ID` and `CEDAR_CLIENT_SECRET`.
 
-1. **Configuration**, on the VM: `cp /srv/kcsara/config/reports.env.example /srv/kcsara/config/reports.env` and fill
-   it in. `node deploy.mjs vm` makes `reports-db.env` itself, and stops until `reports.env` exists.
-2. **Hydra client** for the ETL, with the scopes in db-reporting's `docs/DESIGN.md`:
-   `node hydra.mjs create oauth2-client --name "db-reporting ETL" --grant-type client_credentials --scope d4h:members.read,d4h:groups.read,d4h:qualifications.read,d4h:activities.read --format json`.
-   Its id and secret go in `reports.env` as `CEDAR_CLIENT_ID` and `CEDAR_CLIENT_SECRET`.
-3. **Google**: add `https://reports.kingcountysar.org` to the OAuth client's Authorized JavaScript origins.
-4. **The app**: `npm run build` in db-reporting, then `node deploy.mjs reports` here, then `node deploy.mjs vm`.
-5. **The old database**, once: `npm run import:legacy` in db-reporting. It needs the VM's `reporting` database, which
-   isn't reachable from outside the VM; how to get there is still to settle (see db-reporting's `docs/DEPLOY.md`).
-6. **The first load from D4H**, rather than waiting for the night: on the VM,
-   `docker compose exec reports-etl node db-reporting.mjs etl` (add `--force` when D4H has far fewer records than
-   last time). Its output is in `node deploy.mjs logs reports-etl`.
+**Moving it out of this compose.yaml** (once, on a VM where `node deploy.mjs vm` ran it as a service here), keeping
+its database and settings:
 
-Health checks ask for its `/health`.
+1. `node deploy.mjs vm`. That removes the old `reports`, `reports-etl` and `reports-db` containers.
+2. On the VM, in `/srv/kcsara`, move its settings to its own folder:
+   `mkdir apps/reports/config && mv config/reports-db.env apps/reports/config/database.env && mv config/reports.env apps/reports/config/app.env`.
+   If `.env` there has `REPORTS_HOSTS`, it becomes `HOSTS=` in `apps/reports/config/compose.env`.
+3. `npm run build` in db-reporting, then `node deploy.mjs app ../db-reporting` here.
+
+The old database's import comes before the first D4H load, from a dev machine through `node db.mjs --tunnel` (see
+"The legacy import" in db-reporting's `docs/DEPLOY.md`).
 
 ## Respond
 
@@ -450,7 +449,7 @@ When Grafana gets a public site, add `https://<its host>/login/google` to the cl
 ### Choosing what runs
 
 The core (postgres, hydra, caddy) always runs. Everything else is in profiles: each part in `full` and in its
-own (`monitoring`, `rad`, `cedar`, `reports`, `respond`, and each app added later). Profiles only add services, so to leave one part out, list the others
+own (`monitoring`, `rad`, `cedar`, `respond`, and each app added later). Profiles only add services, so to leave one part out, list the others
 rather than using `full`.
 
 | Command | Runs |
@@ -473,17 +472,17 @@ A new optional part gets `profiles: [full, <its name>]` on each of its services.
 | Change hydra.yml, caddy/, monitoring/ or compose.yaml | edit here, then `node deploy.mjs vm` (it restarts each service whose own configuration changed) |
 | Deploy a new RAD portal build | `npm run build` in rad-portal, then `node deploy.mjs rad` |
 | Deploy a new cedar build | `npm run build` in cedar, then `node deploy.mjs cedar` |
-| Deploy a new reports build | `npm run build` in db-reporting, then `node deploy.mjs reports` |
 | Deploy a new Respond build | `npm run build` in respond-sync, then `node deploy.mjs respond` |
 | Deploy an app with its own compose.yaml | build it, then `node deploy.mjs app ../<repo>` (see [Apps with their own compose.yaml](#apps-with-their-own-composeyaml)) |
 | Import Respond organizations | `node deploy.mjs seed-respond <file>` (see [Respond](#respond)) |
 | Import respond-next's activities into Respond | `node deploy.mjs import-respond <folder> [--dry-run]` (see [Respond](#respond)) |
 | Open Grafana | `node grafana.mjs`, then http://localhost:3030 |
 | See what's running | `node deploy.mjs status` |
-| See a service's log | `node deploy.mjs logs hydra` (or `rad`, `cedar`, `reports`, `reports-etl`, `respond`, `postgres`, `caddy`, `grafana`, ...); `logs -f hydra` keeps watching |
+| See a service's log | `node deploy.mjs logs hydra` (or `rad`, `cedar`, `respond`, `postgres`, `caddy`, `grafana`, ...); `logs -f hydra` keeps watching |
 | Upgrade Hydra | change the image tag in `compose.yaml` (read Ory's upgrade notes first), back up the database, `node deploy.mjs vm` |
 | Back up a database | on the VM: `docker compose exec -T postgres pg_dump -U postgres <database> \| gzip > <database>-$(date +%F).sql.gz` (or `pg_dumpall` for all of them) |
 | Open psql as the superuser | `node db.mjs <database>` (like `node db.mjs hydra`; no database for `postgres`). Add psql options after it, like `-c "<sql>"`, or `< file.sql` to run a file |
+| Run something here against an app's database | `node db.mjs --tunnel` (the VM's postgres at `localhost:15432`, until Ctrl+C), then use the app's URL with `localhost:15432` for `postgres:5432` |
 | See certificates | on the VM: `sudo ls data/caddy/caddy/certificates/*/` |
 
 ## Rotating Hydra's secret

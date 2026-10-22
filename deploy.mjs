@@ -14,7 +14,6 @@ const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-opti
   rad [bundle]          Copy the RAD portal's build (../rad-portal/server/dist/rad-portal.mjs, unless given) to
                         ${ROOT}/apps/rad, and restart it
   cedar [bundle]        The same for cedar (../cedar/dist/cedar.mjs)
-  reports [bundle]      The same for KCSARA Reports (../db-reporting/server/dist/db-reporting.mjs)
   respond [folder]      Copy Respond's build, a folder (../respond-sync/dist, unless given), to
                         ${ROOT}/apps/respond/current (keeping the one before as previous), and restart it
   seed-respond <file>   Import a Respond seed file (organizations, providers, site admins) into its database, and
@@ -68,12 +67,13 @@ async function deployVm() {
     `cd ${ROOT}`,
     'rm -rf .incoming',
     // apps/ has each app's build, copied by its own command (like `rad`); made here so docker doesn't make it, as root.
-    `mkdir -p .incoming ${FOLDERS.join(' ')} config apps/rad apps/cedar apps/reports apps/respond`,
+    `mkdir -p .incoming ${FOLDERS.join(' ')} config apps/rad apps/cedar apps/respond`,
     'tar -xz -C .incoming',
     // Replaces the files inside each folder, keeping the folders: a running container's mount of a folder that was
     // removed and made again still shows the old, empty one.
     `for dir in ${FOLDERS.join(' ')}; do find "$dir" -mindepth 1 ! -type d -delete && cp -a ".incoming/$dir/." "$dir/" || exit 1; done`,
-    'cp .incoming/compose.yaml . && cp .incoming/config/*.env.example config/',
+    // The examples are replaced as a set, so one for a service no longer here doesn't ask for its env file below.
+    'cp .incoming/compose.yaml . && rm -f config/*.env.example && cp .incoming/config/*.env.example config/',
     'rm -rf .incoming',
     // Secrets nobody needs to choose (postgres.env, hydra.env, ...); files that exist are left alone.
     'sh bin/secrets.sh',
@@ -94,8 +94,6 @@ async function deployVm() {
 const APPS = {
   rad: { file: 'rad-portal.mjs', build: ['rad-portal', 'server', 'dist', 'rad-portal.mjs'], repo: 'rad-portal' },
   cedar: { file: 'cedar.mjs', build: ['cedar', 'dist', 'cedar.mjs'], repo: 'cedar' },
-  // reports-etl runs the same file, and picks up the new one on its next run.
-  reports: { file: 'db-reporting.mjs', build: ['db-reporting', 'server', 'dist', 'db-reporting.mjs'], repo: 'db-reporting' },
 };
 
 async function deployApp(app, bundle = path.join(here, '..', ...APPS[app].build)) {
@@ -251,7 +249,6 @@ switch (command) {
     break;
   case 'rad':
   case 'cedar':
-  case 'reports':
     await deployApp(command, arg);
     break;
   case 'respond':

@@ -33,14 +33,6 @@ END
   echo "made config/postgres-exporter.env"
 fi
 
-if [ ! -f reports-db.env ]; then
-  cat > reports-db.env << END
-# Made by bin/secrets.sh. reports-db creates the reporting user and database from DATABASE_URL, with its password.
-DATABASE_URL=postgres://reporting:$(random 24)@postgres:5432/reporting
-END
-  echo "made config/reports-db.env"
-fi
-
 if [ ! -f respond-db.env ]; then
   cat > respond-db.env << END
 # Made by bin/secrets.sh. respond-db creates the respond user and database from DATABASE_URL, with its password.
