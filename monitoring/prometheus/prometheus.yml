@@ -50,7 +50,7 @@ scrape_configs:
     params:
       module: [site]
     file_sd_configs:
-      - files: [/etc/prometheus/targets/sites.json]
+      - files: [/targets/sites.json]
     relabel_configs: &probe
       - source_labels: [__address__]
         target_label: __param_target

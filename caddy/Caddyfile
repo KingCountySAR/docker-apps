@@ -8,7 +8,9 @@
 #     kcsara.health: /health                the path health checks ask for (see bin/site-targets.sh)
 #
 # Caddy gets each site's certificate from Let's Encrypt once its DNS points here (trying Let's Encrypt's staging
-# server while it can't, so waiting doesn't use up the real limits), renews it, and sends http to https.{
+# server while it can't, so waiting doesn't use up the real limits), renews it, and sends http to https.
+
+{
 	# For Let's Encrypt's expiry warnings: ACME_EMAIL in config/caddy.env.
 	email {$ACME_EMAIL}
 }

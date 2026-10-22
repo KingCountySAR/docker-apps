@@ -26,7 +26,8 @@ services:
     volumes:
       - ./monitoring/prometheus:/etc/prometheus:ro
       - ./data/prometheus:/prometheus
-      - site-targets:/etc/prometheus/targets:ro
+      # Not inside /etc/prometheus: Docker can't make a mount point in that read-only folder.
+      - site-targets:/targets:ro
     depends_on:
       monitoring-data: { condition: service_completed_successfully }
     restart: unless-stopped
