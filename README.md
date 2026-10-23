@@ -269,7 +269,7 @@ lists, every minute, each host name in a container's `caddy` label at the path i
 ssh tunnel, until Ctrl+C. Sign in as `admin`, with `GF_SECURITY_ADMIN_PASSWORD` from `config/grafana.env` on the VM.
 Its dashboards, in the KCSARA folder:
 
-- **Sites**: requests per second, 4xx and 5xx, response times (median and 95th percentile, and the app's own), per site
+- **Sites**: requests (in the time range, and per minute), 4xx and 5xx, response times (median and 95th percentile, and the app's own), per site
 - **Host**: the VM's CPU, load, memory, filesystems and disks
 - **Containers**: each service's CPU, memory, network and disk
 - **Health**: health checks, certificate expiry, what Prometheus can reach, Postgres, and Hydra's token requests
