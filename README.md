@@ -45,6 +45,11 @@ http://localhost:4445, and placeholder login/consent URLs on `http://localhost:3
 servers. Its database is in `data/` here (delete that folder to start over). Each app runs from its own repo
 (`npm run dev` there), using this Hydra.
 
+An app's build can also run in Docker here, on the same port as its `npm run dev` and on this stack's `kcsara`
+network, where it reaches Hydra and the other apps as on the VM: `npm run docker -- up -d` in its repo, after
+`npm run build` (`docker compose` with `deploy/compose.yaml` and `deploy/compose.local.yaml`; see each app's deploy
+notes). Without Caddy here, `compose.yaml`'s labels do nothing.
+
 `node hydra.mjs --local <command>` runs Hydra's command line in that local stack, and `node db.mjs --local <database>`
 opens psql there.
 
@@ -128,9 +133,10 @@ one is added or deployed.
 
 ```
 deploy/
-  app.json          { "name": "reports", "files": ["server/dist/db-reporting.mjs", "server/dist/db-reporting.mjs.map"] }
+  app.json            { "name": "reports", "files": ["server/dist/db-reporting.mjs", "server/dist/db-reporting.mjs.map"] }
   compose.yaml
-  app.env.example   its settings, for config/app.env on the VM
+  compose.local.yaml  optional: runs the build in Docker on a dev machine (see On a dev machine)
+  app.env.example     its settings, for config/app.env on the VM
 ```
 
 `name` is the app's name on the VM (lower case letters, digits and `-`). `files` are its build's files or folders,
@@ -138,6 +144,8 @@ paths in the repo, which arrive next to `compose.yaml` under their own names, wi
 `compose.yaml` is an ordinary compose file, with paths from its own folder:
 
 ```yaml
+name: reports                       # the same as app.json's name
+
 services:
   reports:                          # unique on the VM: it's also its name on the kcsara network
     image: node:22-alpine
@@ -177,8 +185,9 @@ settings on the VM, kept between deploys; `${...}` variables come from `config/c
 2. **Settings**: `config/app.env`, from the app's `app.env.example`, and whatever else its `compose.yaml` names in
    `../config/`, made by hand on the VM.
 3. **Deploy**: build it, then `node deploy.mjs app ../<repo>`. On the VM, `bin/deploy-app.sh` checks what arrived (the
-   name in `app.json`, and that compose can read `compose.yaml` with its config files there), brings the database up
-   to date, swaps it in as `current/`, and recreates its containers. When the check fails, nothing changes.
+   name in `app.json` and `compose.yaml`, and that compose can read `compose.yaml` with its config files there),
+   brings the database up to date, swaps it in as `current/`, and recreates its containers. When the check fails,
+   nothing changes.
 4. **DNS** for its host names, pointed at the VM. Caddy finds its labels and gets a certificate by itself.
 
 `node deploy.mjs logs <name>` shows all of its services' logs, and `node deploy.mjs status` lists it. To go back to

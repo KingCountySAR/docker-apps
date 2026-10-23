@@ -31,6 +31,8 @@ fail() { rm -rf .incoming; echo "Not deployed: $1" >&2; exit 1; }
 [ -f .incoming/compose.yaml ] || fail "no compose.yaml in what was sent"
 # So a key for one app can't deploy another's repo by mistake.
 grep -Eq "\"name\" *: *\"$name\"" .incoming/app.json 2> /dev/null || fail "app.json doesn't name the app $name"
+# COMPOSE_PROJECT_NAME (below) wins here, but compose.yaml's own name is the project's on a dev machine.
+grep -Eq "^name: *['\"]?$name['\"]? *$" .incoming/compose.yaml || fail "compose.yaml's name: isn't $name, as app.json's is"
 
 { echo "COMPOSE_PROJECT_NAME=$name"; [ ! -f config/compose.env ] || cat config/compose.env; } > .incoming/.env
 (cd .incoming && docker compose config -q) || fail "compose.yaml doesn't check out, as above (a file it names in $app/config that isn't there yet?)"
