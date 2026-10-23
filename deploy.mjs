@@ -21,6 +21,9 @@ const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-opti
                         Run a command in an app's running container (like a script in its build), with your terminal,
                         or this end's standard input. With --put, the files or folders go first to a temporary folder in
                         the container, removed after, and {put} in the command is that folder
+  backup [-- <restic command>]
+                        Back up to Azure now (it also runs every day), or run a restic command in the backup service,
+                        like backup -- snapshots (see "Backups" in the README)
   restart <name>        Restart an app (all its services), or one of this project's services
   status                What's running, and each app's compose project
   logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, caddy, grafana, ...), or all of an
@@ -42,6 +45,8 @@ const RESTART_ON_CHANGE = {
   grafana: ['monitoring/grafana'],
   alloy: ['monitoring/alloy'],
   'blackbox-exporter': ['monitoring/blackbox.yml'],
+  // Its daily loop is the script, read once when it starts.
+  backup: ['bin/backup.sh'],
 };
 
 /** Shell commands restarting each service in RESTART_ON_CHANGE whose files changed, remembering their checksums */
@@ -176,8 +181,9 @@ async function setupVm() {
 
 const argv = process.argv.slice(2);
 const follow = argv[0] === 'logs' && ['-f', '--follow'].some(flag => argv.includes(flag));
-// exec's command, after --, goes to the VM as it is; its --put options come out before parseArgs sees the rest.
-const split = argv[0] === 'exec' && argv.includes('--') ? argv.indexOf('--') : argv.length;
+// exec's and backup's command, after --, goes to the VM as it is; exec's --put options come out before parseArgs sees
+// the rest.
+const split = ['exec', 'backup'].includes(argv[0]) && argv.includes('--') ? argv.indexOf('--') : argv.length;
 const execCommand = argv.slice(split + 1);
 const puts = [];
 const options = argv.slice(0, split).filter((a, i, all) => {
@@ -204,6 +210,20 @@ switch (command) {
   case 'exec':
     await execInApp(arg, arg2, puts, execCommand);
     break;
+  case 'backup': {
+    // A restic command, or else bin/backup.sh, the same as the daily one, shown in the service's log as well as here
+    // (/proc/1/fd/1 is the log: the container's first process's output).
+    const run = execCommand.length
+      ? ['restic', ...execCommand]
+      : ['sh', '-c', 'set -o pipefail; sh /scripts/backup.sh 2>&1 | tee /proc/1/fd/1'];
+    const tty = process.stdin.isTTY;
+    await onVm([
+      `cd ${ROOT}`,
+      `{ [ -n "$(docker compose ps -q backup 2> /dev/null)" ] || { echo ${quote("The backup service isn't running: see Backups in the README.")}; exit 1; }; }`,
+      ['docker', 'compose', 'exec', ...(tty ? [] : ['-T']), 'backup', ...run].map(quote).join(' '),
+    ], { tty });
+    break;
+  }
   case 'restart':
     if (!arg) fail(`Give an app's name, or a service's: node deploy.mjs restart <name>
 

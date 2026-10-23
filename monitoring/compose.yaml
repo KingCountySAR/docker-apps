@@ -81,10 +81,12 @@ services:
   node-exporter:
     profiles: [full, monitoring]
     image: prom/node-exporter:v1.9.1
-    command: ["--path.rootfs=/host"]
+    # The textfile directory: how the last backup went, from the backup service (bin/backup.sh).
+    command: ["--path.rootfs=/host", "--collector.textfile.directory=/textfile"]
     pid: host
     volumes:
       - /:/host:ro,rslave
+      - ./data/backup/metrics:/textfile:ro
     restart: unless-stopped
 
   # Each container's CPU, memory, disk and network, labelled by compose service.

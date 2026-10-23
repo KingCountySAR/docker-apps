@@ -6,6 +6,7 @@
 #                           others start from config/*.env.example
 #   data/postgres/          the shared postgres: a database (and user) for each app
 #   data/caddy/             Caddy's certificates (from Let's Encrypt) and ACME account
+#   data/backup/            the backup's local cache of what's in Azure, and how the last one went
 # Only Caddy is reachable from outside, on ports 80 and 443. Hydra's admin API (4445) has no authentication of its
 # own: it's only on this network and the VM's loopback address, never through Caddy.
 #
@@ -14,9 +15,9 @@
 # name" in the README).
 name: kcsara
 
-# Profiles choose what runs besides the core here (postgres, hydra, caddy), which always does: `monitoring`, also in
-# `full`. On the VM, COMPOSE_PROFILES in .env picks them for every docker compose command there: `full` unless changed
-# (see "Choosing what runs" in the README).
+# Profiles choose what runs besides the core here (postgres, hydra, caddy, backup), which always does: `monitoring`,
+# also in `full`. On the VM, COMPOSE_PROFILES in .env picks them for every docker compose command
+# there: `full` unless changed (see "Choosing what runs" in the README).
 
 # Prometheus, Grafana and what they collect from: profiles full and monitoring.
 include:
@@ -108,6 +109,44 @@ services:
       - ./data/caddy:/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
+
+  # Backs up the databases and the config that isn't in git to Azure Blob Storage, every day, with restic: only what's
+  # new since the last one, encrypted, and kept by a policy (see bin/backup.sh, and "Backups" in the README). Only on
+  # the VM: on a dev machine, compose.override.yaml puts it in the vm profile.
+  backup:
+    # For pg_dumpall, the same version as postgres; restic comes from backup-restic.
+    image: *postgres-image
+    # restic records each backup's host, and the keep policy goes by it: the same one every time the container is made.
+    hostname: kcsara
+    # POSTGRES_PASSWORD, for pg_dumpall; the storage account and the repository's password
+    env_file: [./config/postgres.env, ./config/backup.env]
+    environment:
+      PATH: /restic:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      RESTIC_CACHE_DIR: /data/cache
+    volumes:
+      - restic-bin:/restic:ro
+      - ./bin:/scripts:ro
+      # All of /srv/kcsara, read-only; bin/backup.sh picks what to back up.
+      - .:/kcsara:ro
+      # restic's cache, the metrics for node-exporter, and where `restic restore` can put files (/data/restore)
+      - ./data/backup:/data
+    command: ["sh", "/scripts/backup.sh", "schedule"]
+    depends_on:
+      backup-restic: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+    init: true
+
+  # Copies the restic program, one file, from restic's own image for the backup service, then exits.
+  backup-restic:
+    image: restic/restic:0.18.0
+    entrypoint: ["cp", "/usr/bin/restic", "/restic/restic"]
+    volumes:
+      - restic-bin:/restic
+    restart: on-failure
+
+volumes:
+  restic-bin:
 
 networks:
   # A fixed name, so other compose projects on the VM can join with `networks: { default: { name: kcsara, external: true } }`

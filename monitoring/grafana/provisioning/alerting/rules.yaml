@@ -163,6 +163,33 @@ groups:
         annotations:
           summary: "{{ $labels.mountpoint }} has {{ humanize $values.A.Value }}% free"
 
+      - uid: backup-late
+        title: Backup late
+        condition: B
+        data:
+          # Hours since the last backup to Azure that succeeded. Before the first, there's nothing: that alerts too.
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              refId: A
+              instant: true
+              expr: (time() - max(kcsara_backup_last_success_timestamp_seconds)) / 3600
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions: [{ evaluator: { type: gt, params: [48] } }]
+        for: 1h
+        noDataState: Alerting
+        execErrState: Error
+        labels: { severity: warning }
+        annotations:
+          summary: No backup to Azure has succeeded in the last 2 days
+          description: See `node deploy.mjs logs backup`, and "Backups" in the README.
+
       - uid: memory-low
         title: Memory low
         condition: B

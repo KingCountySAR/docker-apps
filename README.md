@@ -33,6 +33,8 @@ A consolidated/modular system to collect apps and core services for King County 
   hydra.yml leaves `urls.login` and `urls.consent` at Hydra's defaults.
 - **Monitoring** (profiles `monitoring` and `full`, on by default on the VM): Prometheus collects metrics and Grafana
   graphs them and alerts, from `monitoring/`. See [Monitoring](#monitoring).
+- **Backups**: every day, the databases and the settings that aren't in git, to an
+  Azure storage account, by restic. See [Backups](#backups).
 
 The apps (the RAD portal, cedar, KCSARA Reports, Respond, ...) come from their own repos, each with its own
 `compose.yaml` and its deploy notes (see [Apps](#apps)).
@@ -75,10 +77,11 @@ whole machine, not each container.
     caddy/                       certificates, and Caddy's Let's Encrypt account
     prometheus/                  metrics, kept a year (or 10 GB)
     grafana/                     Grafana's users, settings and alert state
+    backup/                      the backup's cache of what's in Azure, how the last one went, and restored files
 ```
 
 `config/`, `data/` and each `apps/<name>/config/` are all there is to back up; everything else comes from this repo
-or the apps' repos.
+or the apps' repos. The backup service backs them up to Azure every day (see [Backups](#backups)).
 
 ## First-time setup
 
@@ -88,9 +91,10 @@ or the apps' repos.
    `.env.example`), or give `--host` on each command.
 3. **Docker and folders.** `node deploy.mjs setup` (it asks for your sudo password on the VM).
 4. **Copy this folder's files over.** `node deploy.mjs vm`. It makes the secrets (`postgres.env`, `hydra.env`,
-   `grafana.env`, `postgres-exporter.env`) with random values. This first time it stops after copying, and lists the configuration still missing.
+   `grafana.env`, `postgres-exporter.env`) with random values. This first time it stops after copying, and lists the
+   configuration still missing.
 5. **Configuration**, on the VM: `cp /srv/kcsara/config/caddy.env.example /srv/kcsara/config/caddy.env` and set an
-   address for Let's Encrypt's expiry warnings.
+   address for Let's Encrypt's expiry warnings; and `config/backup.env` (see [Setting them up](#setting-them-up)).
 6. **Test name.** Until `jwt.kingcountysar.org` points here, you can run Hydra under a test name (see
    [Testing under another name](#testing-under-another-name)).
 7. **Start everything.** `node deploy.mjs vm` again, then `node deploy.mjs status`.
@@ -101,7 +105,7 @@ or the apps' repos.
    make a client with `node hydra.mjs create oauth2-client ...` (below), then
    `curl -u <client id>:<client secret> -d grant_type=client_credentials -d scope=<scope> https://<host>/oauth2/token`.
 10. **Back up `config/`** somewhere safe (a password manager). Without `SECRETS_SYSTEM`, the database's
-    client secrets and signing keys can't be read.
+    client secrets and signing keys can't be read. The daily backups have them too, from then on.
 11. **The apps**: see [Apps](#apps), and each app's own deploy notes.
 
 ## Testing under another name
@@ -294,7 +298,8 @@ The health checks run from the VM itself, so they can't tell you the VM is down.
 `monitoring/grafana/provisioning/alerting/rules.yaml` has the rules: a site down (only one that's been up in the last
 week, so a site waiting for DNS doesn't count), Hydra's health check failing, Prometheus unable to collect from a
 service, a site with over 5% server errors, a certificate with under 14 days left, a filesystem under 10% free, memory
-under 10% available, and the CPU over 90% for half an hour. Grafana → Alerting → Alert rules shows them.
+under 10% available, the CPU over 90% for half an hour, and no backup in 2 days (always firing on a dev machine,
+which has no backups). Grafana → Alerting → Alert rules shows them.
 
 **They're not sent anywhere yet.** To send them, add a contact point (email or Slack) in Grafana → Alerting → Contact
 points, and make it the default policy's in Notification policies. Email needs Grafana's `[smtp]` settings
@@ -315,7 +320,7 @@ When Grafana gets a public site, add `https://<its host>/login/google` to the cl
 
 ### Choosing what runs
 
-The core (postgres, hydra, caddy) always runs. Monitoring is in the `monitoring` profile, and in `full`.
+The core (postgres, hydra, caddy, backup) always runs. Monitoring is in the `monitoring` profile, and in `full`.
 
 | Command | Runs |
 |---|---|
@@ -326,6 +331,84 @@ On the VM, `COMPOSE_PROFILES` in `/srv/kcsara/.env` picks the profiles for every
 separated; `node deploy.mjs vm` sets it to `full` if it isn't set. Turning a profile off doesn't stop what's already
 running: stop those by name too (like `docker compose --profile monitoring stop`). The apps aren't in profiles: each
 runs in its own project, whatever this one's profiles.
+
+## Backups
+
+Every day at 11:00 UTC (3 or 4 in the morning in Seattle, after the reports' D4H load), the `backup` service backs up
+to an Azure storage account, with [restic](https://restic.readthedocs.io/):
+
+- **The databases**: every one in the shared postgres (the apps' and Hydra's), with their users, as one `pg_dumpall`,
+  tagged `postgres`.
+- **The files that aren't in git**: `.env`, `config/`, each `apps/<name>/config/`, Caddy's certificates
+  (`data/caddy`) and Grafana's data (`data/grafana`), tagged `files`. Not Prometheus's metrics, which only cost old
+  graphs to lose.
+
+Each backup uploads only what's new since the last one, encrypted on the VM first with the repository's password. Then
+restic forgets the backups the keep policy doesn't keep, and deletes their data: the last 7 days, 4 weeks and 12
+months, one each (the policy is in `bin/backup.sh`). Prometheus gets how each went: the **Backup late** alert fires
+when none has succeeded in 2 days.
+
+### Setting them up
+
+1. **Azure**: a storage account (Standard, locally-redundant is enough). In it, Data management → Data protection:
+   turn on soft delete for blobs (14 days), so whatever is deleted, by the keep policy or by someone with the VM's key,
+   can be brought back for a while. Step 3 makes the container.
+2. **Settings**, on the VM: `config/backup.env`, from `config/backup.env.example`: the account's name and an access
+   key, and `RESTIC_PASSWORD` (`openssl rand -base64 32`). **Keep a copy of the password off the VM**, in a password
+   manager, with the account's name: without it the backups can't be read, by anyone.
+3. **Start it**: `node deploy.mjs vm`, then make the repository (and its container) with
+   `node deploy.mjs backup -- init`, then `node deploy.mjs backup` for the first backup now (otherwise the alert fires
+   until 11:00 UTC).
+
+### Looking at them
+
+`node deploy.mjs backup -- <restic command>` runs restic in the backup service, with the repository and password from
+`backup.env`:
+
+| To | Run |
+|---|---|
+| Back up now | `node deploy.mjs backup` |
+| List the backups | `node deploy.mjs backup -- snapshots` |
+| List what's in one | `node deploy.mjs backup -- ls latest --tag files` (or a backup's id for `latest`) |
+| See what they take in Azure | `node deploy.mjs backup -- stats --mode raw-data` |
+| Read every byte back, to check | `node deploy.mjs backup -- check --read-data` (downloads all of it) |
+
+### Restoring
+
+On the VM, in `/srv/kcsara`. Restored files go to `data/backup/restore/` (`/data/restore` in the container), to copy
+from:
+
+- **Files**: `docker compose exec backup restic restore latest --tag files --target /data/restore` (add
+  `--include /kcsara/config` for only that). They're under `data/backup/restore/kcsara/`.
+- **A database**: the dump, out of the backup, then the one database's part of it, or all of it on an empty postgres:
+
+  ```
+  docker compose exec -T backup restic dump latest --tag postgres /postgres.sql > all.sql
+  docker compose exec -T postgres psql -U postgres < all.sql
+  ```
+
+  Over existing databases, restoring all of it fails on what's already there: drop the database first
+  (`DROP DATABASE <name>`), and restore only its part (from `\connect <name>` to the next `\connect`).
+
+**On a new VM**: [First-time setup](#first-time-setup) steps 1 to 4 (which stop before anything starts), and
+`config/backup.env` put back from your password manager. Then on the VM, in `/srv/kcsara`:
+
+1. The files, into place before postgres first starts, so it starts with the old password:
+
+   ```
+   docker compose up backup-restic
+   docker compose run --rm --no-deps backup restic restore latest --tag files --target /data/restore
+   sudo cp -a data/backup/restore/kcsara/. .
+   ```
+
+2. The databases, into the new, empty postgres (it says the postgres user exists already, which is fine):
+
+   ```
+   docker compose up -d --wait postgres
+   docker compose run --rm --no-deps -T backup restic dump latest --tag postgres /postgres.sql | docker compose exec -T postgres psql -U postgres
+   ```
+
+3. `node deploy.mjs vm`, then deploy each app (`node deploy.mjs app ../<repo>`): their settings are back already.
 
 ## Everyday
 
@@ -338,8 +421,9 @@ runs in its own project, whatever this one's profiles.
 | Open Grafana | `node grafana.mjs`, then http://localhost:3030 |
 | See what's running | `node deploy.mjs status` |
 | See a service's log | `node deploy.mjs logs hydra` (or `postgres`, `caddy`, `grafana`, ...), or all of an app's services: `logs rad` (or `cedar`, `reports`, `respond`); `logs -f hydra` keeps watching |
-| Upgrade Hydra | change the image tag in `compose.yaml` (read Ory's upgrade notes first), back up the database, `node deploy.mjs vm` |
-| Back up a database | on the VM: `docker compose exec -T postgres pg_dump -U postgres <database> \| gzip > <database>-$(date +%F).sql.gz` (or `pg_dumpall` for all of them) |
+| Upgrade Hydra | change the image tag in `compose.yaml` (read Ory's upgrade notes first), `node deploy.mjs backup`, `node deploy.mjs vm` |
+| Back up now | `node deploy.mjs backup` (see [Backups](#backups)) |
+| Dump one database to a file | on the VM: `docker compose exec -T postgres pg_dump -U postgres <database> \| gzip > <database>-$(date +%F).sql.gz` |
 | Open psql as the superuser | `node db.mjs <database>` (like `node db.mjs hydra`; no database for `postgres`). Add psql options after it, like `-c "<sql>"`, or `< file.sql` to run a file |
 | Run something here against an app's database | `node db.mjs --tunnel` (the VM's postgres at `localhost:15432`, until Ctrl+C), then use the app's URL with `localhost:15432` for `postgres:5432` |
 | See certificates | on the VM: `sudo ls data/caddy/caddy/certificates/*/` |
