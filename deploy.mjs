@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Sets up the VM and copies this folder's files to it, from Windows, macOS or Linux. See lib/vm.mjs for the settings
 // (DEPLOY_HOST and such, in .env).
+import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -10,8 +11,8 @@ import { ROOT, SSH_USAGE, fail, here, onVm, parseArgs, quote, sendFile } from '.
 const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-options "<options>"]
 
   setup                 Install Docker and create ${ROOT} on a fresh VM (asks for your sudo password)
-  vm                    Copy compose.yaml, hydra/, caddy/, postgres/, monitoring/, bin/ and the config examples, make
-                        any missing secrets, and apply them
+  vm                    Copy compose.yaml, hydra/, caddy/, postgres/, monitoring/, mail/, bin/ and the config examples,
+                        make any missing secrets, and apply them (building the mail service first)
   app <repo>            Deploy an app from its repo: its deploy/ folder (with its compose.yaml), and the build files
                         its deploy/app.json lists, to ${ROOT}/apps/<name> (see "Apps" in the README). Build it first
   database <name> [database]
@@ -34,7 +35,21 @@ ${SSH_USAGE}
 
 Example: node deploy.mjs status --host me@vm.example.org --ssh-options "-i ~/.ssh/vm_key"`;
 
-const FOLDERS = ['hydra', 'caddy', 'postgres', 'monitoring', 'bin'];
+const FOLDERS = ['hydra', 'caddy', 'postgres', 'monitoring', 'mail', 'bin'];
+
+/** Bundles the mail service into mail/dist/mail.mjs (see mail/build.mjs), installing its dependencies the first time. */
+function buildMail() {
+  const dir = path.join(here, 'mail');
+  // npm is npm.cmd on Windows, which only runs through a shell. Node itself mustn't: its path (C:\Program Files\...) has
+  // a space, which the shell would split.
+  const run = (command, args) => {
+    const shell = process.platform === 'win32' && command === 'npm';
+    const { status } = spawnSync(command, args, { cwd: dir, stdio: 'inherit', shell });
+    if (status !== 0) fail(`Building the mail service failed: ${command} ${args.join(' ')} in mail/`);
+  };
+  if (!fs.existsSync(path.join(dir, 'node_modules'))) run('npm', ['ci']);
+  run(process.execPath, ['build.mjs']);
+}
 
 // Configuration a service reads only when it starts, which compose doesn't watch: the service restarts when any of it
 // changed since the last deploy (when the service is running).
@@ -47,6 +62,8 @@ const RESTART_ON_CHANGE = {
   'blackbox-exporter': ['monitoring/blackbox.yml'],
   // Its daily loop is the script, read once when it starts.
   backup: ['bin/backup.sh'],
+  // The bundle, which it reads once when it starts.
+  mail: ['mail/dist'],
 };
 
 /** Shell commands restarting each service in RESTART_ON_CHANGE whose files changed, remembering their checksums */
@@ -59,6 +76,8 @@ function restartsOnChange() {
 }
 
 async function deployVm() {
+  // Every time, so what's sent is never an old build.
+  buildMail();
   // Only the examples: never your own config/*.env, if you have any here.
   const examples = fs.readdirSync(path.join(here, 'config')).filter(f => f.endsWith('.env.example')).map(f => `config/${f}`);
   console.log(`Deploying compose.yaml, ${FOLDERS.join('/, ')}/ to ${ROOT}`);

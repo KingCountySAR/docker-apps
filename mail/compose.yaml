@@ -1,0 +1,41 @@
+# The mail service, included by compose.yaml: receives email for the apps on port 25, checks it with SPF and DKIM, and
+# POSTs each message to its domain's app (see mail/README.md). Paths are relative to the repo, like compose.yaml's.
+#   config/mail.env   the routes: which domain goes to which app (made by bin/secrets.sh, with none)
+# Its host names (MAIL_HOSTS in .env next to compose.yaml, comma separated: mail.kingcountysar.org unless set) are the
+# names the apps' MX records may point at; the first is the one it greets with. They're also a site here, only so Caddy
+# gets and renews a certificate for each, which the service uses for STARTTLS.
+services:
+  mail:
+    # mail/dist/mail.mjs, the bundle `node deploy.mjs vm` builds before sending it (mail/build.mjs): the service and
+    # all its dependencies, so nothing is installed here.
+    image: node:22-alpine
+    working_dir: /app
+    command: [node, --enable-source-maps, mail.mjs]
+    env_file: ./config/mail.env
+    environment:
+      MAIL_HOSTS: ${MAIL_HOSTS:-mail.kingcountysar.org}
+    # Port 25 from anywhere. Docker keeps the sender's address, which SPF checks.
+    ports:
+      - "25:2525"
+    volumes:
+      # The folder, not the file: deploy.mjs replaces the files in it, and a mount of a file would keep the old one.
+      - ./mail/dist:/app:ro
+      # Caddy's certificates. Caddy's keys are readable only by root, so the service runs as root, but with no
+      # capabilities and a read-only filesystem.
+      - ./data/caddy/caddy/certificates:/certs:ro
+    user: root
+    cap_drop: [ALL]
+    read_only: true
+    labels:
+      caddy: ${MAIL_HOSTS:-mail.kingcountysar.org}
+      caddy.import: site
+      caddy.respond: /health 200
+      kcsara.health: /health
+      kcsara.metrics: 9100/metrics
+    healthcheck:
+      test: [CMD, node, -e, "require('net').connect(2525, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+    stop_grace_period: 15s
+    restart: unless-stopped
+    init: true

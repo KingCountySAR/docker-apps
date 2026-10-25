@@ -50,3 +50,20 @@ GF_SECURITY_ADMIN_PASSWORD=$(random 16)
 END
   echo "made config/grafana.env"
 fi
+
+if [ ! -f mail.env ]; then
+  cat > mail.env << END
+# Made by bin/secrets.sh. The mail service's routes (see mail/README.md): mail for each domain goes to an app, as a
+# POST with the route's token. With none, all mail is refused. Then \`docker compose up -d mail\`.
+#
+#   ROUTE_<NAME>=<domain> <url on the kcsara network>
+#   ROUTE_<NAME>_TOKEN=<the bearer token the app expects>
+#   ROUTE_<NAME>_SENDERS=<optional: who may send, comma separated: addresses, or @domain for anyone there>
+#
+# For example, pages for beepers from its INGEST_TOKEN:
+#ROUTE_BEEPERS=beepers.kingcountysar.org http://beepers:4100/api/ingest/email
+#ROUTE_BEEPERS_TOKEN=
+#ROUTE_BEEPERS_SENDERS=dispatch@example.org
+END
+  echo "made config/mail.env"
+fi

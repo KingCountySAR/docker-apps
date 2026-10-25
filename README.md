@@ -35,6 +35,9 @@ A consolidated/modular system to collect apps and core services for King County 
   graphs them and alerts, from `monitoring/`. See [Monitoring](#monitoring).
 - **Backups**: every day, the databases and the settings that aren't in git, to an
   Azure storage account, by restic. See [Backups](#backups).
+- **Mail** receives email for the apps on port 25, checks SPF and DKIM, and POSTs each message to the app its domain
+  routes to (`config/mail.env`), like pages for beepers at `<channel>@beepers.kingcountysar.org`. It only receives:
+  nothing here sends email. See [mail/README.md](mail/README.md).
 
 The apps (the RAD portal, cedar, KCSARA Reports, Respond, ...) come from their own repos, each with its own
 `compose.yaml` and its deploy notes (see [Apps](#apps)).
@@ -64,14 +67,16 @@ whole machine, not each container.
 ```
 /srv/kcsara/
   compose.yaml, hydra/, caddy/,  from this repo (node deploy.mjs vm)
-    postgres/, monitoring/, bin/
-  .env                           COMPOSE_PROFILES: which profiles run (full, unless changed), and HYDRA_HOSTS if set
+    postgres/, monitoring/,
+    mail/, bin/
+  .env                           COMPOSE_PROFILES: which profiles run (full, unless changed), and HYDRA_HOSTS and
+                                 MAIL_HOSTS if set
   apps/<name>/                   each app (rad, cedar, reports, respond), from its repo (node deploy.mjs app <repo>):
     current/                     what was sent: its compose.yaml and build, run as the compose project <name>
     previous/                    the deploy before
     config/                      its settings, kept between deploys: app.env, database.env, compose.env
-  config/                        settings and secrets: caddy.env, and postgres.env, hydra.env, grafana.env and
-                                 postgres-exporter.env (made by bin/secrets.sh)
+  config/                        settings and secrets: caddy.env, and postgres.env, hydra.env, grafana.env,
+                                 postgres-exporter.env and mail.env (made by bin/secrets.sh)
   data/                          everything the services write
     postgres/                    the shared postgres: every app's database
     caddy/                       certificates, and Caddy's Let's Encrypt account
@@ -85,8 +90,8 @@ or the apps' repos. The backup service backs them up to Azure every day (see [Ba
 
 ## First-time setup
 
-1. **Firewall.** Allow ports 22, 80 and 443 to the VM. Check nothing else on it already uses 80 or 443:
-   `sudo ss -ltnp | grep -E ':(80|443) '`.
+1. **Firewall.** Allow ports 22, 80, 443 and 25 (mail) to the VM. Check nothing else on it already uses them:
+   `sudo ss -ltnp | grep -E ':(80|443|25) '`.
 2. **Your ssh login.** Check you can `ssh` to the VM, then put it in `.env` here as `DEPLOY_HOST` (copy
    `.env.example`), or give `--host` on each command.
 3. **Docker and folders.** `node deploy.mjs setup` (it asks for your sudo password on the VM).
@@ -417,6 +422,7 @@ from:
 | Change hydra.yml, caddy/, monitoring/ or compose.yaml | edit here, then `node deploy.mjs vm` (it restarts each service whose own configuration changed) |
 | Deploy an app | `npm run build` in its repo, then `node deploy.mjs app ../<repo>` (like `../rad-portal`, `../cedar`, `../db-reporting`, `../respond-sync`) |
 | Run something in an app's container | `node deploy.mjs exec <app> <service> -- <command>`, like a script in its build. Your terminal, or a file or pipe on standard input, reaches it. `--put <path>` (once per file or folder) copies files from here into a temporary folder in the container first, removed after: `'{put}'` in the command is that folder (quoted, for PowerShell) |
+| Route email to an app, or change its senders | on the VM: edit `config/mail.env` (see [mail/README.md](mail/README.md)), then `docker compose up -d mail` |
 | Restart an app | `node deploy.mjs restart <app>` (or one of this project's services, like `restart hydra`) |
 | Open Grafana | `node grafana.mjs`, then http://localhost:3030 |
 | See what's running | `node deploy.mjs status` |

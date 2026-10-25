@@ -7,8 +7,8 @@
 #   data/postgres/          the shared postgres: a database (and user) for each app
 #   data/caddy/             Caddy's certificates (from Let's Encrypt) and ACME account
 #   data/backup/            the backup's local cache of what's in Azure, and how the last one went
-# Only Caddy is reachable from outside, on ports 80 and 443. Hydra's admin API (4445) has no authentication of its
-# own: it's only on this network and the VM's loopback address, never through Caddy.
+# Only Caddy (ports 80 and 443) and the mail service (port 25) are reachable from outside. Hydra's admin API (4445)
+# has no authentication of its own: it's only on this network and the VM's loopback address, never through Caddy.
 #
 # A service with a site has caddy labels (see caddy/Caddyfile): its host names, and where Caddy passes requests.
 # Hydra's can be changed without changing this file, as HYDRA_HOSTS in .env next to it (see "Testing under another
@@ -22,6 +22,9 @@ name: kcsara
 # Prometheus, Grafana and what they collect from: profiles full and monitoring.
 include:
   - path: monitoring/compose.yaml
+    project_directory: .
+  # Email for the apps, on port 25: always runs, refusing everything until config/mail.env has a route.
+  - path: mail/compose.yaml
     project_directory: .
 
 services:

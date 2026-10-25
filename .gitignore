@@ -5,3 +5,6 @@ data/
 # Your own deploy settings (see .env.example)
 .env
 
+# The mail service's dependencies and its bundle (node deploy.mjs vm builds it)
+node_modules/
+mail/dist/

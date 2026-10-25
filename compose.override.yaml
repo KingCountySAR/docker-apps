@@ -42,6 +42,10 @@ services:
   caddy:
     profiles: [vm]
 
+  # No port 25 here, and no certificate.
+  mail:
+    profiles: [vm]
+
   # Nothing here to back up, and no Azure.
   backup:
     profiles: [vm]
