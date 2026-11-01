@@ -426,7 +426,7 @@ from:
 | Restart an app | `node deploy.mjs restart <app>` (or one of this project's services, like `restart hydra`) |
 | Open Grafana | `node grafana.mjs`, then http://localhost:3030 |
 | See what's running | `node deploy.mjs status` |
-| See a service's log | `node deploy.mjs logs hydra` (or `postgres`, `caddy`, `grafana`, ...), or all of an app's services: `logs rad` (or `cedar`, `reports`, `respond`); `logs -f hydra` keeps watching |
+| See a service's log | `node deploy.mjs logs hydra` (or `postgres`, `caddy`, `grafana`, ...), or all of an app's services: `logs rad` (or `cedar`, `reports`, `respond`); `logs -f hydra` keeps watching; `logs -t hydra` shows when each line was logged (UTC); `logs hydra 1000` shows the last 1000 lines, not 200 |
 | Upgrade Hydra | change the image tag in `compose.yaml` (read Ory's upgrade notes first), `node deploy.mjs backup`, `node deploy.mjs vm` |
 | Back up now | `node deploy.mjs backup` (see [Backups](#backups)) |
 | Dump one database to a file | on the VM: `docker compose exec -T postgres pg_dump -U postgres <database> \| gzip > <database>-$(date +%F).sql.gz` |

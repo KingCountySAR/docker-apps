@@ -27,9 +27,10 @@ const USAGE = `Usage: node deploy.mjs <command> [--host <user@host>] [--ssh-opti
                         like backup -- snapshots (see "Backups" in the README)
   restart <name>        Restart an app (all its services), or one of this project's services
   status                What's running, and each app's compose project
-  logs [-f] [service]   The last 200 lines of a service's log (hydra, postgres, caddy, grafana, ...), or all of an
+  logs [-f] [-t] [service] [lines]
+                        The last 200 lines (or as many as given) of a service's log (hydra, postgres, caddy, grafana, ...), or all of an
                         app's (rad, cedar, reports, respond, ...), or all of this project's; with -f (--follow), then
-                        what's logged after, until Ctrl+C
+                        what's logged after, until Ctrl+C; with -t (--timestamps), each line's time (UTC) from Docker
 
 ${SSH_USAGE}
 
@@ -199,7 +200,10 @@ async function setupVm() {
 }
 
 const argv = process.argv.slice(2);
-const follow = argv[0] === 'logs' && ['-f', '--follow'].some(flag => argv.includes(flag));
+const LOG_FLAGS = { follow: ['-f', '--follow'], timestamps: ['-t', '--timestamps'] };
+const logFlag = flags => argv[0] === 'logs' && flags.some(flag => argv.includes(flag));
+const follow = logFlag(LOG_FLAGS.follow);
+const timestamps = logFlag(LOG_FLAGS.timestamps);
 // exec's and backup's command, after --, goes to the VM as it is; exec's --put options come out before parseArgs sees
 // the rest.
 const split = ['exec', 'backup'].includes(argv[0]) && argv.includes('--') ? argv.indexOf('--') : argv.length;
@@ -212,7 +216,7 @@ const options = argv.slice(0, split).filter((a, i, all) => {
 ${USAGE}`)) && false;
   return all[i - 1] !== '--put';
 });
-const [command, arg, arg2] = parseArgs(options.filter(a => !(follow && (a === '-f' || a === '--follow'))), USAGE);
+const [command, arg, arg2] = parseArgs(options.filter(a => argv[0] !== 'logs' || !Object.values(LOG_FLAGS).flat().includes(a)), USAGE);
 switch (command) {
   case 'setup':
     await setupVm();
@@ -254,13 +258,17 @@ ${USAGE}`);
     await onVm([`cd ${ROOT}`, 'docker compose ps', 'echo', 'docker compose ls']);
     break;
   case 'logs': {
-    const where = projectOf(arg);
+    // A number alone is the line count, for all of this project's services: no service is named with only digits.
+    const [name, lines = '200'] = /^\d+$/.test(arg ?? '') && arg2 === undefined ? [undefined, arg] : [arg, arg2];
+    if (!/^\d+$/.test(lines)) fail(`The number of lines is a whole number, not ${lines}\n\n${USAGE}`);
+    const where = projectOf(name);
+    const logs = `docker compose logs --tail ${lines}${timestamps ? ' --timestamps' : ''}`;
     if (follow) {
       // With a terminal on the VM, Ctrl+C stops docker compose there, rather than just this end of ssh; stopping that
       // way (exit 130) isn't a failure.
-      await onVm([`cd ${ROOT}`, where, '{ docker compose logs --tail 200 -f $service || [ $? -eq 130 ]; }'], { tty: process.stdout.isTTY });
+      await onVm([`cd ${ROOT}`, where, `{ ${logs} -f $service || [ $? -eq 130 ]; }`], { tty: process.stdout.isTTY });
     } else {
-      await onVm([`cd ${ROOT}`, where, 'docker compose logs --tail 200 $service']);
+      await onVm([`cd ${ROOT}`, where, `${logs} $service`]);
     }
     break;
   }
