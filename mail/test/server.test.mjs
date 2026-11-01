@@ -58,9 +58,9 @@ beforeEach(() => {
 });
 
 /** A message, DKIM-signed by `sign` (a domain) when given, sent with the envelope `mailFrom` and `to`. */
-async function send({ from = 'Dispatch <dispatch@example.org>', to = 'callout@beepers.test', mailFrom, sign, subject = 'Callout', text = 'Lost hiker near Mt Si.' } = {}) {
+async function send({ from = 'Dispatch <dispatch@example.org>', to = 'callout@beepers.test', mailFrom, sign, subject = 'Callout', text = 'Lost hiker near Mt Si.', contentType = 'text/plain' } = {}) {
   let raw = Buffer.from(
-    [`From: ${from}`, `To: ${[].concat(to).join(', ')}`, `Subject: ${subject}`, 'Message-ID: <1@example.org>', 'Date: Sat, 24 Oct 2026 19:00:00 +0000', 'Content-Type: text/plain; charset=utf-8', '', text, ''].join('\r\n'),
+    [`From: ${from}`, `To: ${[].concat(to).join(', ')}`, `Subject: ${subject}`, 'Message-ID: <1@example.org>', 'Date: Sat, 24 Oct 2026 19:00:00 +0000', `Content-Type: ${contentType}; charset=utf-8`, '', text, ''].join('\r\n'),
   );
   if (sign) {
     const signed = await dkimSign(raw, { signatureData: [{ signingDomain: sign, selector: 'sel', privateKey: dkimKey }] });
@@ -105,6 +105,35 @@ describe('mail', () => {
       },
     );
     assert.equal(post.body.auth.by, 'dkim');
+  });
+
+  it('sends the text in the body of an HTML-only message', async () => {
+    const html = [
+      '<!doctype html><html><head><title>ESAR Message</title></head>',
+      '<body style="font-family: Helvetica">',
+      '  <div><!-- Messages start --><div>',
+      '    <p> 000 Green River. Team is out of the field. <a href="https://example.org/x">Sign out</a> w/ time &amp; miles.</p>',
+      '    <p>COMMS Carrie T <img src="cid:logo" alt="logo"></p>',
+      '  </div></div>',
+      '</body></html>',
+    ].join('\r\n');
+    await send({ sign: 'example.org', contentType: 'text/html', text: html });
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].body.text, '000 Green River. Team is out of the field. Sign out w/ time & miles.\n\nCOMMS Carrie T');
+  });
+
+  it('sends the text of an HTML part that is alone in multipart/mixed (as from Everbridge)', async () => {
+    const mime = [
+      '--b',
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: 7bit',
+      '',
+      '<html><head><title>ESAR Message</title></head><body><div><p> Team is out of the field.</p></div></body></html>',
+      '--b--',
+    ].join('\r\n');
+    await send({ sign: 'example.org', contentType: 'multipart/mixed; boundary="b"', text: mime });
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].body.text.trim(), 'Team is out of the field.');
   });
 
   it('delivers mail SPF allows, from a subdomain of the From domain', async () => {

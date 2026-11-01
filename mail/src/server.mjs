@@ -1,3 +1,4 @@
+import { htmlToText } from 'html-to-text';
 import { simpleParser } from 'mailparser';
 import { SMTPServer } from 'smtp-server';
 import { checkAuthentication } from './check.mjs';
@@ -10,6 +11,17 @@ const smtpError = (code, message) => Object.assign(new Error(message), { respons
 const domainOf = (address) => address.slice(address.lastIndexOf('@') + 1).toLowerCase();
 /** IPv4 clients show up as ::ffff:1.2.3.4 on a dual-stack socket; SPF wants 1.2.3.4. */
 const plainIp = (ip = '') => ip.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, '');
+
+/** An HTML-only message's text: the text in its <body>, without images, link URLs or word wrapping. */
+const textOfHtml = (html) =>
+  htmlToText(html, {
+    wordwrap: false,
+    baseElements: { selectors: ['body'], returnDomByDefault: true },
+    selectors: [
+      { selector: 'a', options: { ignoreHref: true } },
+      { selector: 'img', format: 'skip' },
+    ],
+  });
 
 /** Counters for /metrics: messages by result, and recipients refused for having no route. */
 export class Stats {
@@ -78,7 +90,9 @@ export function createMailServer(cfg, { stats, tls = null, resolver, fetch, log 
   async function receive(raw, session) {
     const envelopeFrom = session.envelope.mailFrom?.address ?? '';
     const recipients = session.envelope.rcptTo.map((r) => r.address);
-    const parsed = await simpleParser(raw, { skipImageLinks: true, skipTextToHtml: true });
+    // mailparser only makes text from HTML when the HTML is the whole message (not inside multipart/mixed, as from
+    // Everbridge), and wraps it with link URLs: textOfHtml does it instead, for any message without plain text.
+    const parsed = await simpleParser(raw, { skipImageLinks: true, skipTextToHtml: true, skipHtmlToText: true });
     const from = parsed.from?.value ?? [];
     const summary = `from=${from[0]?.address ?? '?'} to=${recipients.join(',')} ip=${plainIp(session.remoteAddress)}`;
     const refuse = (result, code, message) => {
@@ -110,7 +124,7 @@ export function createMailServer(cfg, { stats, tls = null, resolver, fetch, log 
       from: fromAddress,
       fromName: from[0].name ?? '',
       subject: parsed.subject ?? '',
-      text: parsed.text ?? '',
+      text: parsed.text?.trim() || !parsed.html ? (parsed.text ?? '') : textOfHtml(parsed.html),
       messageId: parsed.messageId ?? '',
       date: (parsed.date ?? new Date()).toISOString(),
       auth: { by: auth.by, spf: auth.spf, dkim: auth.dkim },
